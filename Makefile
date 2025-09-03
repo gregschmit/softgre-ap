@@ -1,4 +1,4 @@
-VERSION = $(shell git describe --tags --long --always)$(shell git diff-index --quiet HEAD -- || echo '-changed')
+VERSION = $(shell git describe --dirty 2>/dev/null)
 CFLAGS ?= -Wall -DVERSION=\"$(VERSION)\"
 
 .PHONY: all
