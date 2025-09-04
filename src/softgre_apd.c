@@ -138,7 +138,7 @@ struct xdp_state *load_xdp_program(char *xdp_path, char **ifs, int num_ifs) {
     };
 
     for (int i = 0; i < 3; i++) {
-        ret = bpf_map_update_elem(map_fd, sample_clients[i].mac, &sample_clients[i], BPF_ANY);
+        int ret = bpf_map_update_elem(map_fd, sample_clients[i].mac, &sample_clients[i], BPF_ANY);
         if (ret) {
             log_error("Failed to add sample data to map: %d", ret);
         } else if (debug) {
@@ -160,17 +160,17 @@ struct xdp_state *load_xdp_program(char *xdp_path, char **ifs, int num_ifs) {
             continue;
         }
 
-        int ret = bpf_xdp_attach(ifindex, prog_fd, XDP_FLAGS_UPDATE_IF_NOEXIST, NULL);
-        if (ret) {
-            fprintf(stderr, "Failed to attach XDP program to interface %s: %d\n", ifs[i], ret);
-            state->ifindexes[i] = -1;
-        } else {
-            if (debug) {
-                printf("Successfully attached XDP program to interface %s (ifindex %d)\n", ifs[i], ifindex);
-            }
-            state->ifindexes[i] = ifindex;
-            successful_attachments++;
-        }
+        // int ret = bpf_xdp_attach(ifindex, prog_fd, XDP_FLAGS_UPDATE_IF_NOEXIST, NULL);
+        // if (ret) {
+        //     fprintf(stderr, "Failed to attach XDP program to interface %s: %d\n", ifs[i], ret);
+        //     state->ifindexes[i] = -1;
+        // } else {
+        //     if (debug) {
+        //         printf("Successfully attached XDP program to interface %s (ifindex %d)\n", ifs[i], ifindex);
+        //     }
+        //     state->ifindexes[i] = ifindex;
+        //     successful_attachments++;
+        // }
     }
 
     if (successful_attachments == 0) {
@@ -190,34 +190,34 @@ void unload_xdp_program(struct xdp_state *state) {
     if (!state) { return; }
 
     // Detach XDP program from all interfaces
-    for (int i = 0; i < state->num_ifs; i++) {
-        if (state->ifindexes[i] > 0) {
-            int ret = bpf_xdp_detach(state->ifindexes[i], XDP_FLAGS_UPDATE_IF_NOEXIST);
-            if (ret) {
-                fprintf(stderr, "Failed to detach XDP program from interface index %d: %d\n",
-                        state->ifindexes[i], ret);
-            } else if (debug) {
-                printf("Successfully detached XDP program from interface index %d\n",
-                       state->ifindexes[i]);
-            }
-        }
-    }
+    // for (int i = 0; i < state->num_ifs; i++) {
+    //     if (state->ifindexes[i] > 0) {
+    //         int ret = bpf_xdp_detach(state->ifindexes[i], XDP_FLAGS_UPDATE_IF_NOEXIST);
+    //         if (ret) {
+    //             fprintf(stderr, "Failed to detach XDP program from interface index %d: %d\n",
+    //                     state->ifindexes[i], ret);
+    //         } else if (debug) {
+    //             printf("Successfully detached XDP program from interface index %d\n",
+    //                    state->ifindexes[i]);
+    //         }
+    //     }
+    // }
 
-    // Close the map file descriptor
-    if (state->map_fd >= 0) {
-        close(state->map_fd);
-    }
+    // // Close the map file descriptor
+    // if (state->map_fd >= 0) {
+    //     close(state->map_fd);
+    // }
 
-    // Close the BPF object (this will unload the program from the kernel)
-    if (state->obj) {
-        bpf_object__close(state->obj);
-    }
+    // // Close the BPF object (this will unload the program from the kernel)
+    // if (state->obj) {
+    //     bpf_object__close(state->obj);
+    // }
 
-    // Free allocated memory
-    if (state->ifindexes) {
-        free(state->ifindexes);
-    }
-    free(state);
+    // // Free allocated memory
+    // if (state->ifindexes) {
+    //     free(state->ifindexes);
+    // }
+    // free(state);
 }
 
 void update_ebpf_map() {
