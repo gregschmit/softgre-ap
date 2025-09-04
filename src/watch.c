@@ -2,13 +2,14 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+
 #include <limits.h>
 #include <errno.h>
 #include <libgen.h>
 
 #include <sys/inotify.h>
 
-#include "dbg.h"
+#include "log.h"
 
 #define EVENT_SIZE (sizeof(struct inotify_event))
 #define BUF_LEN (EVENT_SIZE + NAME_MAX + 1)
@@ -26,55 +27,56 @@ int watch(char *filepath, void (*callback)()) {
     // Initialize `inotify`.
     int fd = inotify_init();
     if (fd < 0) {
-        dbg_error("inotify_init");
+        log_errno("inotify_init");
         return 1;
     }
 
-    // Combine `dn` and `fn` to get the fullpath.
+    // Combine `dn` and `fn` to get the `fullpath`.
     char fullpath[PATH_MAX + 1];
     int fullpath_len = strlen(dn) + strlen(fn) + 2;
     snprintf(fullpath, fullpath_len, "%s/%s", dn, fn);
 
-    dbg("Watching %s (%s / %s) for changes...", fullpath, dn, fn);
+    log_info("Watching %s...", fullpath);
 
     int wd = -1;
     int wd_is_dir = 0;
     char buf[BUF_LEN];
     while (1) {
         if (interrupt) {
-            dbg("Stopping...");
+            dbg("Stopping watch...");
             break;
         }
 
-        // If wd < 0, then try to watch the file.
+        // If `wd < 0`, then try to watch the file.
         if (wd < 0) {
             wd_is_dir = 0;
             wd = inotify_add_watch(fd, fullpath, IN_MODIFY | IN_MOVE_SELF | IN_DELETE_SELF);
             if (wd < 0) {
                 if (errno == ENOENT) {
                     // If file doesn't exist, then watch parent directory.
-                    dbg("File not found, watching parent directory: %s", dn);
+                    dbg("File not found; watching parent directory: %s", dn);
                     wd_is_dir = 1;
                     wd = inotify_add_watch(fd, dn, IN_CREATE | IN_MOVED_TO);
                     if (wd < 0) {
-                        dbg_error("inotify_add_watch");
+                        dbg_errno("inotify_add_watch");
                         sleep(TIMEOUT);
                         continue;
                     }
                 } else {
-                    dbg_error("inotify_add_watch");
+                    log_errno("inotify_add_watch");
+                    log_error("File %s could not be watched.", fullpath);
                     sleep(TIMEOUT);
                     continue;
                 }
             }
         }
 
-        // Now we definitely have a watch descriptor. Wait for an event:
+        // Now we definitely have a watch descriptor; wait for an event:
         int length = read(fd, buf, BUF_LEN);
         if (length < 0) {
-            dbg_error("read");
+            log_errno("read");
             if (inotify_rm_watch(fd, wd) < 0) {
-                dbg_error("inotify_rm_watch");
+                log_errno("inotify_rm_watch");
                 wd = -1;
                 sleep(TIMEOUT);
                 continue;
@@ -83,7 +85,7 @@ int watch(char *filepath, void (*callback)()) {
             sleep(TIMEOUT);
             continue;
         } else if (length == 0) {
-            dbg("read returned 0? ...");
+            log_error("read returned 0?!");
             continue;
         }
 
