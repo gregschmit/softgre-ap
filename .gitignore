@@ -1,5 +1,6 @@
 softgre_apd
 softgre_ap_xdp.o
+softgre_ap_map.conf
 
 # Created by https://www.toptal.com/developers/gitignore/api/c,linux,macos,windows
 # Edit at https://www.toptal.com/developers/gitignore?templates=c,linux,macos,windows

@@ -8,18 +8,28 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <sys/inotify.h>
 #include <limits.h>
 #include <string.h>
 #include <errno.h>
 #include <libgen.h>
 
+#include <sys/inotify.h>
+
+#include <netinet/in.h>
+
+#define DEFAULT_MAP_PATH "/var/run/softgre_ap_map.conf"
 #define EVENT_SIZE (sizeof(struct inotify_event))
 #define BUF_LEN (EVENT_SIZE + NAME_MAX + 1)
 #define TIMEOUT 2
 
 volatile int interrupt = 0;
 int debug = 0;
+
+struct Client {
+    unsigned char mac[6];
+    struct in_addr ip;
+    unsigned int vlan;
+};
 
 void interrupt_handler(int _signum) {
     interrupt = 1;
@@ -43,9 +53,15 @@ void dbg_error(const char *s) {
     fprintf(stderr, "DEBUG: (%s) %s\n", s, e);
 }
 
-int watch(char *path, void (*callback)()) {
-    char *fn = basename(path);
-    char *dn = dirname(path);
+void parse_config_file(const char *filepath) {
+}
+
+/*
+ * Watch the specified file for changes and execute the callback when a change is detected.
+ */
+int watch(char *filepath, void (*callback)()) {
+    char *fn = basename(filepath);
+    char *dn = dirname(filepath);
 
     // Initialize `inotify`.
     int fd = inotify_init();
@@ -164,32 +180,110 @@ int watch(char *path, void (*callback)()) {
     return 0;
 }
 
+int load_xdp_program() {
+    // TODO
+    return 0;
+}
+
 void update_ebpf_map() {
-    dbg("Updating map.");
+    // TODO
 }
 
 int main(int argc, char *argv[]) {
+    int clear_existing = 0;
     int foreground = 0;
+    char xdp_program_path[PATH_MAX + 1] = "";
+    char map_path[PATH_MAX + 1] = DEFAULT_MAP_PATH;
+
+    // If this program was invoked with a path, then assume the XDP program is in the same
+    // directory.
+    char *last_slash = strrchr(argv[0], '/');
+    if (last_slash != NULL) {
+        snprintf(xdp_program_path, sizeof(xdp_program_path), "%s/softgre_ap_xdp.o", last_slash);
+
+        // Check if that file DOESN'T exist, and if so, clear the `xdp_program_path`.
+        FILE *fp = fopen(xdp_program_path, "r");
+        if (fp == NULL) {
+            xdp_program_path[0] = '\0';
+        } else {
+            fclose(fp);
+        }
+    }
+
+    // If that file doesn't exist, try to find using PATH.
+    char *path_env = getenv("PATH");
+    if (path_env != NULL) {
+        char *path = strtok(path_env, ":");
+        while (path != NULL) {
+            snprintf(xdp_program_path, sizeof(xdp_program_path), "%s/softgre_ap_xdp.o", path);
+            FILE *fp = fopen(xdp_program_path, "r");
+            if (fp != NULL) {
+                fclose(fp);
+                break;
+            }
+            path = strtok(NULL, ":");
+        }
+    }
 
     int ch;
     char version[256] = "softgre_apd " VERSION;
     char usage[2048] = "softgre_apd " VERSION "\n\n"
-        "Usage: softgre_apd [-dfVh] <interface(s)...>"
-        "  Options:\n"
-        "  -d       Enable debug logging.\n"
-        "  -f       Foreground mode (no daemonization).\n"
-        "  -V       Show version.\n"
-        "  -h -?    Show usage.\n";
+        "Usage: softgre_apd [-dfVh] [interface(s)...]\n"
+        "Options:\n"
+        "  -c         Clear existing XDP programs on interfaces.\n"
+        "  -d         Enable debug logging.\n"
+        "  -f         Foreground mode (no daemonization).\n"
+        "  -m FILE    MAC map file (default: " DEFAULT_MAP_PATH ").\n"
+        "  -x FILE    XDP program file (default: neighbor softgre_ap_xdp.o or PATH\n"
+        "             softgre_ap_xdp.o).\n"
+        "  -V         Show version.\n"
+        "  -h -?      Show usage.\n";
     int i = 0;
-    while ((ch = getopt(argc, argv, "dfVh?")) != -1) {
+    while ((ch = getopt(argc, argv, "cdfm:x:Vh?")) != -1) {
         i++;
         switch (ch) {
+        case 'c':
+            clear_existing = 1;
+            // TODO: Implement.
+            break;
         case 'd':
             debug = 1;
             break;
         case 'f':
             foreground = 1;
+            // TODO: Implement.
             break;
+        case 'm':
+            int len = strlen(optarg);
+            if (len <= 0) {
+                fprintf(stderr, "Invalid map file.\n");
+                exit(1);
+            } else if (len > PATH_MAX) {
+                fprintf(stderr, "Map file path is too long.\n");
+                exit(1);
+            } else {
+                strcpy(map_path, optarg);
+            }
+            break;
+        case 'x':
+            int len = strlen(optarg);
+            if (len <= 0) {
+                fprintf(stderr, "Invalid XDP program file.\n");
+                exit(1);
+            } else if (len > PATH_MAX) {
+                fprintf(stderr, "XDP program file path is too long.\n");
+                exit(1);
+            } else {
+                strcpy(xdp_program_path, optarg);
+            }
+
+            FILE *fp = fopen(xdp_program_path, "r");
+            if (fp == NULL) {
+                fprintf(stderr, "XDP program file error: %s\n", strerror(errno));
+                exit(1);
+            } else {
+                fclose(fp);
+            }
         case 'V':
             printf("%s\n", version);
             exit(0);
@@ -206,20 +300,28 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    char *path = NULL;
-    for (int i = optind; i < argc; i++) {
-        if (path == NULL) {
-            path = argv[i];
-        }
-        printf("positional: %s\n", argv[i]);
+    // Check that we have an XDP program.
+    if (xdp_program_path[0] == '\0') {
+        fprintf(stderr, "No XDP program found.\n");
+        exit(1);
     }
 
-    if (strlen(path) > PATH_MAX) {
-        fprintf(stderr, "Watch path is too long.\n");
-        exit(EXIT_FAILURE);
+    // Check if XDP program can be read.
+    FILE *fp = fopen(xdp_program_path, "r");
+    if (fp == NULL) {
+        fprintf(stderr, "XDP program file error: %s\n", strerror(errno));
+        exit(1);
+    } else {
+        fclose(fp);
+    }
+
+    int num_interfaces = argc - optind;
+    char **interfaces = argv + optind;
+    for (int i = 0; i < num_interfaces; i++) {
+        printf("interface: %s\n", interfaces[i]);
     }
 
     // TODO: Load the XDP program onto selected interfaces.
 
-    return watch(path, &update_ebpf_map);
+    return watch(map_path, &update_ebpf_map);
 }
