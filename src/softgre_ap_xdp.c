@@ -1,3 +1,9 @@
+/*
+ * SoftGRE Access Point XDP Program
+ *
+ * This program handles encapsulation/decapsulation of Dynamic SoftGRE traffic.
+ */
+
 #include <linux/bpf.h>
 #include <linux/if_ether.h>
 #include <linux/if_vlan.h>
