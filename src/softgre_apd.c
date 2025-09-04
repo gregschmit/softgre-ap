@@ -355,7 +355,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Register signal handler.
-    signal(SIGINT, interrupt_handler);
+    // signal(SIGINT, interrupt_handler);
 
     // Organize interface list.
     int num_ifs = argc - optind;
