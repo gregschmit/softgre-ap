@@ -254,11 +254,11 @@ int main(int argc, char *argv[]) {
             // TODO: Implement.
             break;
         case 'm':
-            int len = strlen(optarg);
-            if (len <= 0) {
+            int map_length = strlen(optarg);
+            if (map_length <= 0) {
                 fprintf(stderr, "Invalid map file.\n");
                 exit(1);
-            } else if (len > PATH_MAX) {
+            } else if (map_length > PATH_MAX) {
                 fprintf(stderr, "Map file path is too long.\n");
                 exit(1);
             } else {
@@ -266,11 +266,11 @@ int main(int argc, char *argv[]) {
             }
             break;
         case 'x':
-            int len = strlen(optarg);
-            if (len <= 0) {
+            int xdp_length = strlen(optarg);
+            if (xdp_length <= 0) {
                 fprintf(stderr, "Invalid XDP program file.\n");
                 exit(1);
-            } else if (len > PATH_MAX) {
+            } else if (xdp_length > PATH_MAX) {
                 fprintf(stderr, "XDP program file path is too long.\n");
                 exit(1);
             } else {
