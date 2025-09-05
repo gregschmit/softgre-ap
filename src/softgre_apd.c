@@ -24,7 +24,6 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 
-#include "device.h"
 #include "device/list.h"
 #include "log.h"
 #include "watch.h"
