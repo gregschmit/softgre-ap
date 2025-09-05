@@ -25,6 +25,7 @@
 #include <bpf/bpf.h>
 
 #include "device.h"
+#include "device/list.h"
 #include "log.h"
 #include "watch.h"
 
@@ -73,13 +74,13 @@ struct xdp_state *close_xdp_state(struct xdp_state *state) {
     return NULL;
 }
 
-void try_clear_bpf_map(struct bfp_map *map) {
+void try_clear_bpf_map(struct bpf_map *map) {
     if (!map) { return; }
 
     void *cur_key = NULL;
     void *next_key = NULL;
     while (bpf_map__get_next_key(map, cur_key, next_key, MAC_SIZE) == 0) {
-        bpf_map__delete_elem(map, next_key, MAC_SIZE);
+        bpf_map__delete_elem(map, next_key, MAC_SIZE, BPF_ANY);
         cur_key = next_key;
     }
 }
@@ -196,8 +197,12 @@ struct xdp_state *load_xdp_program(char *xdp_path, int num_ifs, char **ifs) {
     return state;
 }
 
-// Parse the map file, returning a heap-allocated NULL-terminated array of devices.
-struct Device *parse_map_file(const char *path) {
+struct DeviceList parse_map_file(const char *path) {
+    struct DeviceList list = device_list__new();
+    if (!list.devices) {
+        return list;
+    }
+
     FILE *fp = fopen(path, "r");
     if (!fp) {
         if (errno == ENOENT) {
@@ -208,22 +213,11 @@ struct Device *parse_map_file(const char *path) {
             log_errno("fopen");
             log_error("Failed to open map file.");
         }
-        return NULL;
+        return list;
     }
 
-    // Start with a block of 32 devices, to reduce reallocations.
-    int devices_size = 32;
-    struct Device *devices = calloc(devices_size, sizeof(struct Device));
-    if (!devices) {
-        log_errno("calloc");
-        log_error("Failed to allocate memory for devices.");
-        fclose(fp);
-        return NULL;
-    }
-
-    // Read file line by line.
+    // Read file line by line into the device list.
     char linebuf[MAX_LINE_SIZE] = "";
-    int i = 0;
     while (fgets(linebuf, sizeof(linebuf), fp)) {
         // Ignore comments.
         if (linebuf[0] == '#') { continue; }
@@ -254,28 +248,13 @@ struct Device *parse_map_file(const char *path) {
             continue;
         }
 
-        // If we run out of space, allocate more. We must ALWAYS have a NULL terminator.
-        if (i >= devices_size - 1) {
-            devices_size *= 2;
-            struct Device *new_devices = realloc(devices, devices_size * sizeof(struct Device));
-            if (!new_devices) {
-                log_errno("realloc");
-                log_error("Failed to allocate memory for devices.");
-                free(devices);
-                fclose(fp);
-                return NULL;
-            }
-            devices = new_devices;
-            memset(&devices[i+1], 0, (devices_size / 2) * sizeof(struct Device));
-        }
-
-        devices[i++] = device;
+        device_list__add(list, device);
     }
 
-    return devices;
+    return list;
 }
 
-void update_bpf_map(struct xdp_state *state) {
+void update_bpf_map(struct xdp_state *state, const char *map_path) {
     if (!state || !state->obj) { return; }
 
     // Get the Map object.
@@ -283,8 +262,8 @@ void update_bpf_map(struct xdp_state *state) {
     if (!map) { return; }
 
     // Get parsed map file.
-    struct Device *devices = parse_map_file(map_path);
-    if (!devices) { return; }
+    struct DeviceList device_list = parse_map_file(map_path);
+    if (!device_list.length) { return; }
 
     // Clear BPF map.
     // TODO: Improve this to be more performant by iterating over the map and removing entries not
@@ -292,13 +271,14 @@ void update_bpf_map(struct xdp_state *state) {
     try_clear_bpf_map(map);
 
     // Update the BPF map with the new devices.
-    int i = 0;
-    struct Device *device = NULL;
-    while (device = devices[i++]) {
-        bpf_map_update_elem(map, &device->mac, device, BPF_ANY);
+    for (int i = 0; i < device_list.length; i++) {
+        struct Device device = device_list.devices[i];
+        bpf_map__update_elem(
+            map, &device.mac, sizeof(device.mac), &device, sizeof(device), BPF_ANY
+        );
     }
 
-    free(devices);
+    device_list__free(device_list);
 }
 
 int main(int argc, char *argv[]) {
@@ -447,7 +427,7 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    int res = watch(map_path, &update_bpf_map, state);
+    int res = watch(map_path, &update_bpf_map, state, map_path);
 
     log_info("Unloading XDP program...");
     state = close_xdp_state(state);

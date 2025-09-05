@@ -13,5 +13,5 @@
 struct Device {
     unsigned char mac[MAC_SIZE];
     struct in_addr ip;
-    unsigned int vlan;
+    unsigned short vlan;
 };
