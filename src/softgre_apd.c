@@ -140,32 +140,6 @@ struct xdp_state *load_xdp_program(char *xdp_path, int num_ifs, char **ifs) {
     }
     try_clear_bpf_map(map);
 
-    // Add some sample data to the map.
-    struct Device sample_devices[] = {
-        {{0xa6, 0x89, 0x75, 0x1f, 0x1c, 0x47}, {.s_addr = inet_addr("192.168.1.10")}, 100},
-        {{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}, {.s_addr = inet_addr("192.168.1.20")}, 200},
-        {{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}, {.s_addr = inet_addr("192.168.1.30")}, 0}
-    };
-
-    for (int i = 0; i < 3; i++) {
-        int ret = bpf_map__update_elem(
-            map,
-            sample_devices[i].mac,
-            sizeof(sample_devices[i].mac),
-            &sample_devices[i],
-            sizeof(sample_devices[i]),
-            BPF_ANY
-        );
-        if (ret) {
-            log_error("Failed to add sample data to map: %d", ret);
-        } else if (debug) {
-            log_info("Added MAC %02x:%02x:%02x:%02x:%02x:%02x -> IP %s, VLAN %u",
-                   sample_devices[i].mac[0], sample_devices[i].mac[1], sample_devices[i].mac[2],
-                   sample_devices[i].mac[3], sample_devices[i].mac[4], sample_devices[i].mac[5],
-                   inet_ntoa(sample_devices[i].ip), sample_devices[i].vlan);
-        }
-    }
-
     // Attach the XDP program to each interface.
     int successful_attachments = 0;
     for (int i = 0; i < num_ifs; i++) {
