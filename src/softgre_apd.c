@@ -201,7 +201,7 @@ struct DeviceList parse_map_file(const char *path) {
         char ip[16] = "";
         int res = sscanf(
             linebuf,
-            "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx %15s %u",
+            "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx %15s %hu",
             &device.mac[0],
             &device.mac[1],
             &device.mac[2],
