@@ -18,7 +18,6 @@
 // static const unsigned char target_mac[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
 static const unsigned char target_mac[6] = {0xa6, 0x89, 0x75, 0x1f, 0x1c, 0x47};
 
-#define MAX_DEVICES 2048
 #define VLAN_ID 99
 #define ETH_P_8021Q 0x8100
 
@@ -58,7 +57,7 @@ char _license[] SEC("license") = "Proprietary";
 // Shared map for MAC to Device mappings.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(key_size, 6);  // MAC Address
+    __uint(key_size, MAC_SIZE);
     __uint(value_size, sizeof(struct Device));
     __uint(max_entries, MAX_DEVICES);
 } mac_map SEC(".maps");

@@ -1,7 +1,7 @@
 /*
  * SoftGRE Access Point Daemon
  *
- * This daemon loads/unload the XDP program and monitors the mapping file to keep the eBPF Map
+ * This daemon loads/unload the XDP program and monitors the mapping file to keep the BPF Map
  * updated.
  */
 
