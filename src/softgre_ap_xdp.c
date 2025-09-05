@@ -13,20 +13,17 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-struct Client {
-    unsigned char mac[6];
-    struct in_addr ip;
-    unsigned int vlan;
-};
+#include "device.h"
 
 // static const unsigned char target_mac[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
 static const unsigned char target_mac[6] = {0xa6, 0x89, 0x75, 0x1f, 0x1c, 0x47};
 
+#define MAX_DEVICES 2048
 #define VLAN_ID 99
 #define ETH_P_8021Q 0x8100
 
 SEC("xdp")
-int xdp_softgre_ap_main(struct xdp_md *ctx) {
+int xdp_softgre_ap(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;
     struct ethhdr *eth = data;
@@ -41,9 +38,9 @@ int xdp_softgre_ap_main(struct xdp_md *ctx) {
 
         // Test map access by looking up the first sample MAC address
         // unsigned char test_mac[6] = {0xa6, 0x89, 0x75, 0x1f, 0x1c, 0x47};
-        // struct Client *client = bpf_map_lookup_elem(&mac_map, test_mac);
-        // if (client) {
-        //     bpf_printk("gns: found MAC in map! IP: %pI4, VLAN: %u\n", &client->ip.s_addr, client->vlan);
+        // struct Device *device = bpf_map_lookup_elem(&mac_map, test_mac);
+        // if (device) {
+        //     bpf_printk("gns: found MAC in map! IP: %pI4, VLAN: %u\n", &device->ip.s_addr, device->vlan);
         // } else {
         //     bpf_printk("gns: MAC not found in map\n");
         // }
@@ -56,13 +53,12 @@ int xdp_softgre_ap_main(struct xdp_md *ctx) {
     return XDP_PASS;
 }
 
-// Add BTF information for the program
-// SEC(".BTF");
+char _license[] SEC("license") = "Proprietary";
 
-// Shared map for MAC to endpoint mappings
-// struct {
-//     __uint(type, BPF_MAP_TYPE_HASH);
-//     __uint(key_size, 6);  // MAC address size
-//     __uint(value_size, sizeof(struct Client));
-//     __uint(max_entries, 1024);
-// } mac_map SEC(".maps");
+// Shared map for MAC to Device mappings.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(key_size, 6);  // MAC Address
+    __uint(value_size, sizeof(struct Device));
+    __uint(max_entries, MAX_DEVICES);
+} mac_map SEC(".maps");

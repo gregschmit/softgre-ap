@@ -24,6 +24,7 @@
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
 
+#include "device.h"
 #include "log.h"
 #include "watch.h"
 
@@ -33,123 +34,124 @@
 volatile int interrupt = 0;
 int debug = 0;
 
-struct Client {
-    unsigned char mac[6];
-    struct in_addr ip;
-    unsigned int vlan;
-};
-
 struct xdp_state {
     struct bpf_object *obj;
-    int map_fd;
-    int *ifindexes;
+
     int num_ifs;
+    int *ifindexes;
+    struct xdp_link **links;
 };
+
+// Close the XDP state and free all resources. This includes destroying all links, which will detach
+// the XDP program from all interfaces. Return NULL so the result can be assigned or returned, which
+// will help avoid dangling pointers.
+struct xdp_state *close_xdp_state(struct xdp_state *state) {
+    if (!state) return NULL;
+
+    if (state->ifindexes) { free(state->ifindexes); }
+    if (state->links) {
+        for (int i = 0; i < state->num_ifs; i++) {
+            if (state->links[i]) {
+                int res = bpf_link__destroy(state->links[i]);
+                if (res) {
+                    log_error("Failed to destroy XDP link (%d).", res);
+                }
+            }
+        }
+        free(state->links);
+    }
+    bpf_object__close(state->obj);
+    free(state);
+
+    return NULL
+}
 
 void interrupt_handler(int _signum) {
     interrupt = 1;
 }
 
-void parse_config_file(const char *filepath) {
-}
-
-struct xdp_state *load_xdp_program(char *xdp_path, char **ifs, int num_ifs) {
+struct xdp_state *load_xdp_program(char *xdp_path, int num_ifs, char **ifs) {
     log_info("Loading XDP program.");
 
-    struct bpf_object *obj;
-    struct bpf_program *prog;
-    int prog_fd, map_fd;
-
     // Allocate state structure.
-    struct xdp_state *state = malloc(sizeof(struct xdp_state));
+    struct xdp_state *state = calloc(1, sizeof(struct xdp_state));
     if (!state) {
         log_error("Failed to allocate memory for XDP state.");
         return NULL;
     }
 
     // Allocate memory for interface indexes.
-    state->ifindexes = malloc(num_ifs * sizeof(int));
+    state->ifindexes = calloc(num_ifs, sizeof(int));
     if (!state->ifindexes) {
-        log_error("Failed to allocate memory for if indexes.");
-        free(state);
-        return NULL;
+        log_error("Failed to allocate memory for interface indexes.");
+        return close_xdp_state(state);
     }
     state->num_ifs = num_ifs;
 
+    // Allocate memory for links.
+    state->links = calloc(num_ifs, sizeof(struct xdp_link *));
+    if (!state->links) {
+        log_error("Failed to allocate memory for links.");
+        return close_xdp_state(state);
+    }
+
     // Open and load the XDP object file.
-    obj = bpf_object__open(xdp_path);
-    if (!obj) {
+    state->obj = bpf_object__open(xdp_path);
+    if (!state->obj) {
         log_errno("bpf_object__open");
         log_error("Failed to open XDP object file: %s", xdp_path);
-        free(state->ifindexes);
-        free(state);
-        return NULL;
+        return close_xdp_state(state);
     }
 
-    // Load the BPF object into the kernel
-    if (bpf_object__load(obj)) {
+    // Load the BPF object into the kernel.
+    if (bpf_object__load(state->obj)) {
         log_errno("bpf_object__load");
         log_error("Failed to load BPF object.");
-        bpf_object__close(obj);
-        free(state->ifindexes);
-        free(state);
-        return NULL;
+        return close_xdp_state(state);
     }
 
-    // Find the XDP program
-    prog = bpf_object__find_program_by_name(obj, "xdp_vlan_tagger");
+    // Find the XDP program.
+    struct bpf_program *prog = bpf_object__find_program_by_name(state->obj, "xdp_softgre_ap");
     if (!prog) {
-        log_error("Failed to find XDP program in object file");
-        bpf_object__close(obj);
-        free(state->ifindexes);
-        free(state);
-        return NULL;
+        log_error("Failed to find XDP program.");
+        return close_xdp_state(state);
     }
 
-    prog_fd = bpf_program__fd(prog);
-    if (prog_fd < 0) {
-        log_error("Failed to get program file descriptor");
-        bpf_object__close(obj);
-        free(state->ifindexes);
-        free(state);
-        return NULL;
+    // Find the BPF map.
+    struct bpf_map *map = bpf_object__find_map_by_name(state->obj, "mac_map");
+    if (!map) {
+        log_error("Failed to find BPF map.");
+        return close_xdp_state(state);
     }
 
-    // Create a hash map to store MAC -> {IP, VLAN} mappings
-    // Key: MAC address (6 bytes), Value: Client struct
-    map_fd = bpf_map_create(BPF_MAP_TYPE_HASH, "mac_map", 6, sizeof(struct Client), 1024, NULL);
-    if (map_fd < 0) {
-        log_error("Failed to create MAC map: %d", map_fd);
-        bpf_object__close(obj);
-        free(state->ifindexes);
-        free(state);
-        return NULL;
-    }
-
-    // Store state information
-    state->obj = obj;
-    state->map_fd = map_fd;
-
-    // Add some sample data to the map
-    struct Client sample_clients[] = {
+    // Add some sample data to the map.
+    struct Device sample_devices[] = {
         {{0xa6, 0x89, 0x75, 0x1f, 0x1c, 0x47}, {.s_addr = inet_addr("192.168.1.10")}, 100},
         {{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}, {.s_addr = inet_addr("192.168.1.20")}, 200},
         {{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff}, {.s_addr = inet_addr("192.168.1.30")}, 0}
     };
 
     for (int i = 0; i < 3; i++) {
-        int ret = bpf_map_update_elem(map_fd, sample_clients[i].mac, &sample_clients[i], BPF_ANY);
+        int ret = bpf_map__update_elem(
+            map,
+            sample_devices[i].mac,
+            sizeof(sample_devices[i].mac),
+            &sample_devices[i],
+            sizeof(sample_devices[i]),
+            BPF_ANY,
+        );
+        int ret = bpf_map_update_elem(map_fd, sample_devices[i].mac, &sample_devices[i], BPF_ANY);
         if (ret) {
             log_error("Failed to add sample data to map: %d", ret);
         } else if (debug) {
             log_info("Added MAC %02x:%02x:%02x:%02x:%02x:%02x -> IP %s, VLAN %u\n",
-                   sample_clients[i].mac[0], sample_clients[i].mac[1], sample_clients[i].mac[2],
-                   sample_clients[i].mac[3], sample_clients[i].mac[4], sample_clients[i].mac[5],
-                   inet_ntoa(sample_clients[i].ip), sample_clients[i].vlan);
+                   sample_devices[i].mac[0], sample_devices[i].mac[1], sample_devices[i].mac[2],
+                   sample_devices[i].mac[3], sample_devices[i].mac[4], sample_devices[i].mac[5],
+                   inet_ntoa(sample_devices[i].ip), sample_devices[i].vlan);
         }
     }
 
-    // Attach the XDP program to each specified interface
+    // Attach the XDP program to each interface.
     int successful_attachments = 0;
     for (int i = 0; i < num_ifs; i++) {
         int ifindex = if_nametoindex(ifs[i]);
@@ -160,68 +162,31 @@ struct xdp_state *load_xdp_program(char *xdp_path, char **ifs, int num_ifs) {
             continue;
         }
 
-        // int ret = bpf_xdp_attach(ifindex, prog_fd, XDP_FLAGS_UPDATE_IF_NOEXIST, NULL);
-        // if (ret) {
-        //     fprintf(stderr, "Failed to attach XDP program to interface %s: %d\n", ifs[i], ret);
-        //     state->ifindexes[i] = -1;
-        // } else {
-        //     if (debug) {
-        //         printf("Successfully attached XDP program to interface %s (ifindex %d)\n", ifs[i], ifindex);
-        //     }
-        //     state->ifindexes[i] = ifindex;
-        //     successful_attachments++;
-        // }
+        struct bpf_link *link = bpf_program__attach_xdp(prog, ifindex);
+        state->links[i] = link;
+        if (link) {
+            log_info("Attached to interface %s (ifindex %d)", ifs[i], ifindex);
+            successful_attachments++;
+        } else {
+            log_errno("bpf_program__attach_xdp");
+            log_error("Failed to attach XDP program to interface %s.", ifs[i]);
+            continue;
+        }
     }
 
     if (successful_attachments == 0) {
-        fprintf(stderr, "Failed to attach XDP program to any interface\n");
-        close(map_fd);
-        bpf_object__close(obj);
-        free(state->ifindexes);
-        free(state);
-        return NULL;
+        log_error("Failed to attach XDP program to any interface.");
+        return close_xdp_state(state);
     }
 
     return state;
 }
 
-void unload_xdp_program(struct xdp_state *state) {
-    log_info("Unloading XDP program...");
-    if (!state) { return; }
-
-    // Detach XDP program from all interfaces
-    // for (int i = 0; i < state->num_ifs; i++) {
-    //     if (state->ifindexes[i] > 0) {
-    //         int ret = bpf_xdp_detach(state->ifindexes[i], XDP_FLAGS_UPDATE_IF_NOEXIST);
-    //         if (ret) {
-    //             fprintf(stderr, "Failed to detach XDP program from interface index %d: %d\n",
-    //                     state->ifindexes[i], ret);
-    //         } else if (debug) {
-    //             printf("Successfully detached XDP program from interface index %d\n",
-    //                    state->ifindexes[i]);
-    //         }
-    //     }
-    // }
-
-    // // Close the map file descriptor
-    // if (state->map_fd >= 0) {
-    //     close(state->map_fd);
-    // }
-
-    // // Close the BPF object (this will unload the program from the kernel)
-    // if (state->obj) {
-    //     bpf_object__close(state->obj);
-    // }
-
-    // // Free allocated memory
-    // if (state->ifindexes) {
-    //     free(state->ifindexes);
-    // }
-    // free(state);
+void parse_config_file(const char *filepath) {
 }
 
-void update_ebpf_map() {
-    // TODO
+void update_ebpf_map(struct xdp_state *state) {
+    if (!state) { return; }
 }
 
 int main(int argc, char *argv[]) {
@@ -362,15 +327,16 @@ int main(int argc, char *argv[]) {
     char **ifs = argv + optind;
 
     // Load the XDP program onto selected interfaces.
-    // struct xdp_state *xdp_state = load_xdp_program(xdp_path, ifs, num_ifs);
-    // if (!xdp_state) {
-    //     log_error("Failed to load XDP program.");
-    //     exit(1);
-    // }
+    struct xdp_state *state = load_xdp_program(xdp_path, num_ifs, ifs);
+    if (!state) {
+        log_error("Failed to load XDP program.");
+        exit(1);
+    }
 
-    int res = watch(map_path, &update_ebpf_map);
+    int res = watch(map_path, &update_ebpf_map, state);
 
-    // unload_xdp_program(xdp_state);
+    log_info("Unloading XDP program...");
+    state = close_xdp_state(state);
 
     return res;
 }

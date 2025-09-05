@@ -8,7 +8,7 @@ softgre_ap_xdp.o: src/softgre_ap_xdp.c
 	clang $(CFLAGS) -O2 -target bpf -c src/softgre_ap_xdp.c -o $@
 
 softgre_apd: src/softgre_apd.o src/watch.o src/log.o
-	cc $(CFLAGS) -g -O0 $^ -o $@
+	cc $(CFLAGS) -g -O0 $^ -o $@ -lbpf
 
 dev: softgre_ap_xdp.o softgre_apd
 	@echo "Running dev configuration..."

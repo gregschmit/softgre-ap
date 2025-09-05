@@ -10,6 +10,7 @@
 #include <sys/inotify.h>
 
 #include "log.h"
+#include "watch.h"
 
 #define EVENT_SIZE (sizeof(struct inotify_event))
 #define BUF_LEN (EVENT_SIZE + NAME_MAX + 1)

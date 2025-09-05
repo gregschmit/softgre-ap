@@ -4,6 +4,8 @@
 #include <string.h>
 #include <errno.h>
 
+#include "log.h"
+
 extern int debug;
 
 void log_info(const char *msg, ...) {
