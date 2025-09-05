@@ -44,12 +44,22 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
         bpf_printk("gns: found packet!");
 
         // Test map access by looking up the first sample MAC address
-        unsigned char test_mac[6] = {0xa6, 0x89, 0x75, 0x1f, 0x1c, 0x47};
+        unsigned char test_mac[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
         struct Device *d = bpf_map_lookup_elem(&mac_map, &test_mac);
         if (d) {
-            bpf_printk("gns: found MAC in map! IP: %pI4, VLAN: %u", &d->ip.s_addr, d->vlan);
+            bpf_printk(
+                "gns: Found MAC: %02x:%02x:%02x:%02x:%02x:%02x, IP: %pI4, VLAN: %u",
+                d->mac[0],
+                d->mac[1],
+                d->mac[2],
+                d->mac[3],
+                d->mac[4],
+                d->mac[5],
+                &d->ip.s_addr,
+                d->vlan
+            );
         } else {
-            bpf_printk("gns: MAC not found in map");
+            bpf_printk("gns: MAC not found");
         }
 
         // Note: FCS recalculation is typically handled by the network hardware

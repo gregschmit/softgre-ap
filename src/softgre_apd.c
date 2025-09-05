@@ -10,10 +10,10 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-#include <string.h>
 #include <errno.h>
 #include <limits.h>
 #include <signal.h>
+#include <string.h>
 
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -31,8 +31,11 @@
 #define DEFAULT_MAP "/var/run/softgre_ap_map.conf"
 #define DEFAULT_XDP "softgre_ap_xdp.o"
 
-volatile int interrupt = 0;
+// Must fit the largest map entry; e.g. `FF:FF:FF:FF:FF:FF 255.255.255.255 4095\0`.
+#define MAX_LINE_SIZE 39
+
 int debug = 0;
+volatile int interrupt = 0;
 
 struct xdp_state {
     struct bpf_object *obj;
@@ -41,6 +44,10 @@ struct xdp_state {
     int *ifindexes;
     struct bpf_link **links;
 };
+
+void interrupt_handler(int _signum) {
+    interrupt = 1;
+}
 
 // Close the XDP state and free all resources. This includes destroying all links, which will detach
 // the XDP program from all interfaces. Return NULL so the result can be assigned or returned, which
@@ -66,8 +73,15 @@ struct xdp_state *close_xdp_state(struct xdp_state *state) {
     return NULL;
 }
 
-void interrupt_handler(int _signum) {
-    interrupt = 1;
+void try_clear_bpf_map(struct bfp_map *map) {
+    if (!map) { return; }
+
+    void *cur_key = NULL;
+    void *next_key = NULL;
+    while (bpf_map__get_next_key(map, cur_key, next_key, MAC_SIZE) == 0) {
+        bpf_map__delete_elem(map, next_key, MAC_SIZE);
+        cur_key = next_key;
+    }
 }
 
 struct xdp_state *load_xdp_program(char *xdp_path, int num_ifs, char **ifs) {
@@ -123,6 +137,7 @@ struct xdp_state *load_xdp_program(char *xdp_path, int num_ifs, char **ifs) {
         log_error("Failed to find BPF map.");
         return close_xdp_state(state);
     }
+    try_clear_bpf_map(map);
 
     // Add some sample data to the map.
     struct Device sample_devices[] = {
@@ -181,11 +196,109 @@ struct xdp_state *load_xdp_program(char *xdp_path, int num_ifs, char **ifs) {
     return state;
 }
 
-void parse_config_file(const char *filepath) {
+// Parse the map file, returning a heap-allocated NULL-terminated array of devices.
+struct Device *parse_map_file(const char *path) {
+    FILE *fp = fopen(path, "r");
+    if (!fp) {
+        if (errno == ENOENT) {
+            // It's actually a normal condition for the file to not exist.
+            dbg_errno("fopen");
+        } else {
+            // Other errors should be logged.
+            log_errno("fopen");
+            log_error("Failed to open map file.");
+        }
+        return NULL;
+    }
+
+    // Start with a block of 32 devices, to reduce reallocations.
+    int devices_size = 32;
+    struct Device *devices = calloc(devices_size, sizeof(struct Device));
+    if (!devices) {
+        log_errno("calloc");
+        log_error("Failed to allocate memory for devices.");
+        fclose(fp);
+        return NULL;
+    }
+
+    // Read file line by line.
+    char linebuf[MAX_LINE_SIZE] = "";
+    int i = 0;
+    while (fgets(linebuf, sizeof(linebuf), fp)) {
+        // Ignore comments.
+        if (linebuf[0] == '#') { continue; }
+
+        // Parse the line, logging but otherwise disregarding any errors.
+        struct Device device = {0};
+        char ip[16] = "";
+        int res = sscanf(
+            linebuf,
+            "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx %15s %u",
+            &device.mac[0],
+            &device.mac[1],
+            &device.mac[2],
+            &device.mac[3],
+            &device.mac[4],
+            &device.mac[5],
+            ip,
+            &device.vlan
+        );
+
+        if (res != 8) {
+            log_error("Failed to parse line: `%s`", linebuf);
+            continue;
+        }
+
+        if (!inet_pton(AF_INET, ip, &device.ip)) {
+            log_error("Failed to parse IP address: `%s`", ip);
+            continue;
+        }
+
+        // If we run out of space, allocate more. We must ALWAYS have a NULL terminator.
+        if (i >= devices_size - 1) {
+            devices_size *= 2;
+            struct Device *new_devices = realloc(devices, devices_size * sizeof(struct Device));
+            if (!new_devices) {
+                log_errno("realloc");
+                log_error("Failed to allocate memory for devices.");
+                free(devices);
+                fclose(fp);
+                return NULL;
+            }
+            devices = new_devices;
+            memset(&devices[i+1], 0, (devices_size / 2) * sizeof(struct Device));
+        }
+
+        devices[i++] = device;
+    }
+
+    return devices;
 }
 
-void update_ebpf_map(struct xdp_state *state) {
-    if (!state) { return; }
+void update_bpf_map(struct xdp_state *state) {
+    if (!state || !state->obj) { return; }
+
+    // Get the Map object.
+    struct bpf_map *map = bpf_object__find_map_by_name(state->obj, "mac_map");
+    if (!map) { return; }
+
+    // Get parsed map file.
+    struct Device *devices = parse_map_file(map_path);
+    if (!devices) { return; }
+
+    // Clear BPF map.
+    // TODO: Improve this to be more performant by iterating over the map and removing entries not
+    // present in the new device list.
+    try_clear_bpf_map(map);
+
+    // Update the BPF map with the new devices.
+    int i = 0;
+    struct Device *device = NULL;
+    while (device = devices[i++]) {
+        bpf_map_update_elem(map, &device->mac, device, BPF_ANY);
+    }
+
+    free(devices);
 }
 
 int main(int argc, char *argv[]) {
@@ -334,7 +447,7 @@ int main(int argc, char *argv[]) {
         exit(1);
     }
 
-    int res = watch(map_path, &update_ebpf_map, state);
+    int res = watch(map_path, &update_bpf_map, state);
 
     log_info("Unloading XDP program...");
     state = close_xdp_state(state);
