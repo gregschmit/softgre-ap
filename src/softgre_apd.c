@@ -39,7 +39,7 @@ struct xdp_state {
 
     int num_ifs;
     int *ifindexes;
-    struct xdp_link **links;
+    struct bpf_link **links;
 };
 
 // Close the XDP state and free all resources. This includes destroying all links, which will detach
@@ -89,7 +89,7 @@ struct xdp_state *load_xdp_program(char *xdp_path, int num_ifs, char **ifs) {
     state->num_ifs = num_ifs;
 
     // Allocate memory for links.
-    state->links = calloc(num_ifs, sizeof(struct xdp_link *));
+    state->links = calloc(num_ifs, sizeof(struct bpf_link *));
     if (!state->links) {
         log_error("Failed to allocate memory for links.");
         return close_xdp_state(state);
