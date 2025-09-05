@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -21,9 +22,12 @@ extern volatile int interrupt;
 /*
  * Watch the specified file for changes and execute the callback when a change is detected.
  */
-int watch(char *filepath, void (*callback)()) {
+int watch(char *filepath, void (*callback)(), ...) {
     char *fn = basename(filepath);
     char *dn = dirname(filepath);
+
+    va_list args;
+    va_start(args, callback);
 
     // Initialize `inotify`.
     int fd = inotify_init();
@@ -99,13 +103,13 @@ int watch(char *filepath, void (*callback)()) {
                 if (event->len > 0 && strcmp(event->name, fn) == 0) {
                     if (event->mask & IN_CREATE) {
                         dbg("%s created", event->name);
-                        (*callback)();
+                        (*callback)(args);
                         inotify_rm_watch(fd, wd);
                         wd = -1;
                         break;
                     } else if (event->mask & IN_MOVED_TO) {
                         dbg("%s moved in", event->name);
-                        (*callback)();
+                        (*callback)(args);
                         inotify_rm_watch(fd, wd);
                         wd = -1;
                         break;
@@ -114,16 +118,16 @@ int watch(char *filepath, void (*callback)()) {
             } else {
                 if (event->mask & IN_MODIFY) {
                     dbg("%s modified", fullpath);
-                    (*callback)();
+                    (*callback)(args);
                 } else if (event->mask & IN_MOVE_SELF) {
                     dbg("%s moved out", fullpath);
-                    (*callback)();
+                    (*callback)(args);
                     inotify_rm_watch(fd, wd);
                     wd = -1;
                     break;
                 } else if (event->mask & IN_DELETE_SELF) {
                     dbg("%s deleted", fullpath);
-                    (*callback)();
+                    (*callback)(args);
                     inotify_rm_watch(fd, wd);
                     wd = -1;
                     break;
@@ -133,6 +137,8 @@ int watch(char *filepath, void (*callback)()) {
             offset += EVENT_SIZE + event->len;
         }
     }
+
+    va_end(args);
 
     // Cleanup.
     if (wd >= 0) {

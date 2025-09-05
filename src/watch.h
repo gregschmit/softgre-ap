@@ -1,1 +1,1 @@
-int watch(char *filepath, void (*callback)());
+int watch(char *filepath, void (*callback)(), ...);

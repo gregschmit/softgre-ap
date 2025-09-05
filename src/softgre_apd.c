@@ -63,7 +63,7 @@ struct xdp_state *close_xdp_state(struct xdp_state *state) {
     bpf_object__close(state->obj);
     free(state);
 
-    return NULL
+    return NULL;
 }
 
 void interrupt_handler(int _signum) {
@@ -138,9 +138,8 @@ struct xdp_state *load_xdp_program(char *xdp_path, int num_ifs, char **ifs) {
             sizeof(sample_devices[i].mac),
             &sample_devices[i],
             sizeof(sample_devices[i]),
-            BPF_ANY,
+            BPF_ANY
         );
-        int ret = bpf_map_update_elem(map_fd, sample_devices[i].mac, &sample_devices[i], BPF_ANY);
         if (ret) {
             log_error("Failed to add sample data to map: %d", ret);
         } else if (debug) {
