@@ -143,7 +143,7 @@ struct xdp_state *load_xdp_program(char *xdp_path, int num_ifs, char **ifs) {
         if (ret) {
             log_error("Failed to add sample data to map: %d", ret);
         } else if (debug) {
-            log_info("Added MAC %02x:%02x:%02x:%02x:%02x:%02x -> IP %s, VLAN %u\n",
+            log_info("Added MAC %02x:%02x:%02x:%02x:%02x:%02x -> IP %s, VLAN %u",
                    sample_devices[i].mac[0], sample_devices[i].mac[1], sample_devices[i].mac[2],
                    sample_devices[i].mac[3], sample_devices[i].mac[4], sample_devices[i].mac[5],
                    inet_ntoa(sample_devices[i].ip), sample_devices[i].vlan);
