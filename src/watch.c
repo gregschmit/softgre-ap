@@ -4,9 +4,10 @@
 #include <string.h>
 #include <unistd.h>
 
-#include <limits.h>
 #include <errno.h>
 #include <libgen.h>
+#include <limits.h>
+#include <poll.h>
 
 #include <sys/inotify.h>
 
@@ -15,7 +16,7 @@
 
 #define EVENT_SIZE (sizeof(struct inotify_event))
 #define BUF_LEN (EVENT_SIZE + NAME_MAX + 1)
-#define TIMEOUT 2
+#define TIMEOUT 1
 
 extern volatile int interrupt;
 
@@ -63,13 +64,14 @@ int watch(char *filepath, void (*callback)(), ...) {
                     wd_is_dir = 1;
                     wd = inotify_add_watch(fd, dn, IN_CREATE | IN_MOVED_TO);
                     if (wd < 0) {
-                        dbg_errno("inotify_add_watch");
+                        log_errno("inotify_add_watch");
+                        log_error("Failed to watch %s.", dn);
                         sleep(TIMEOUT);
                         continue;
                     }
                 } else {
                     log_errno("inotify_add_watch");
-                    log_error("File %s could not be watched.", fullpath);
+                    log_error("Failed to watch %s.", fullpath);
                     sleep(TIMEOUT);
                     continue;
                 }
@@ -77,6 +79,20 @@ int watch(char *filepath, void (*callback)(), ...) {
         }
 
         // Now we definitely have a watch descriptor; wait for an event:
+        struct pollfd pfd = {
+            .fd = fd,
+            .events = POLLIN
+        };
+        int res = poll(&pfd, 1, TIMEOUT * 1000);
+        if (res < 0) {
+            dbg_errno("poll");
+            continue;
+        } else if (res == 0) {
+            // Continue to check for interrupt.
+            continue;
+        }
+
+        // Now read the event.
         int length = read(fd, buf, BUF_LEN);
         if (length < 0) {
             log_errno("read");

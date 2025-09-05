@@ -318,8 +318,10 @@ int main(int argc, char *argv[]) {
         fclose(fp);
     }
 
-    // Register signal handler.
-    // signal(SIGINT, interrupt_handler);
+    // Register signal handlers.
+    signal(SIGINT, interrupt_handler);
+    signal(SIGTERM, interrupt_handler);
+    signal(SIGQUIT, interrupt_handler);
 
     // Organize interface list.
     int num_ifs = argc - optind;
