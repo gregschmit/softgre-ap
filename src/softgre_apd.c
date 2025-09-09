@@ -21,12 +21,10 @@
 
 #include <linux/bpf.h>
 
-#include <bpf/libbpf.h>
-#include <bpf/bpf.h>
-
 #include "device/list.h"
 #include "log.h"
 #include "watch.h"
+#include "xdp_state.h"
 
 #define DEFAULT_MAP "/var/run/softgre_ap_map.conf"
 #define DEFAULT_XDP "softgre_ap_xdp.o"
@@ -37,151 +35,14 @@
 int debug = 0;
 volatile int interrupt = 0;
 
-struct xdp_state {
-    struct bpf_object *obj;
-
-    int num_ifs;
-    int *ifindexes;
-    struct bpf_link **links;
-};
-
 void interrupt_handler(int _signum) {
     interrupt = 1;
 }
 
-// Close the XDP state and free all resources. This includes destroying all links, which will detach
-// the XDP program from all interfaces. Return NULL so the result can be assigned or returned, which
-// will help avoid dangling pointers.
-struct xdp_state *close_xdp_state(struct xdp_state *state) {
-    if (!state) return NULL;
-
-    if (state->ifindexes) { free(state->ifindexes); }
-    if (state->links) {
-        for (int i = 0; i < state->num_ifs; i++) {
-            if (state->links[i]) {
-                int res = bpf_link__destroy(state->links[i]);
-                if (res) {
-                    log_error("Failed to destroy XDP link (%d).", res);
-                }
-            }
-        }
-        free(state->links);
-    }
-    bpf_object__close(state->obj);
-    free(state);
-
-    return NULL;
-}
-
-void try_clear_bpf_map(struct bpf_map *map, unsigned int key_size) {
-    if (!map) { return; }
-
-    void *cur_key = NULL;
-    void *next_key = NULL;
-    while (bpf_map__get_next_key(map, cur_key, next_key, key_size) == 0) {
-        bpf_map__delete_elem(map, next_key, key_size, BPF_ANY);
-        cur_key = next_key;
-    }
-}
-
-struct xdp_state *load_xdp_program(char *xdp_path, int num_ifs, char **ifs) {
-    log_info("Loading XDP program.");
-
-    // Allocate state structure.
-    struct xdp_state *state = calloc(1, sizeof(struct xdp_state));
-    if (!state) {
-        log_error("Failed to allocate memory for XDP state.");
+struct DeviceList *parse_map_file(const char *path) {
+    struct DeviceList *list = device_list__new();
+    if (!list) {
         return NULL;
-    }
-
-    // Allocate memory for interface indexes.
-    state->ifindexes = calloc(num_ifs, sizeof(int));
-    if (!state->ifindexes) {
-        log_error("Failed to allocate memory for interface indexes.");
-        return close_xdp_state(state);
-    }
-    state->num_ifs = num_ifs;
-
-    // Allocate memory for links.
-    state->links = calloc(num_ifs, sizeof(struct bpf_link *));
-    if (!state->links) {
-        log_error("Failed to allocate memory for links.");
-        return close_xdp_state(state);
-    }
-
-    // Open and load the XDP object file.
-    state->obj = bpf_object__open(xdp_path);
-    if (!state->obj) {
-        log_errno("bpf_object__open");
-        log_error("Failed to open XDP object file: %s", xdp_path);
-        return close_xdp_state(state);
-    }
-
-    // Load the BPF object into the kernel.
-    if (bpf_object__load(state->obj)) {
-        log_errno("bpf_object__load");
-        log_error("Failed to load BPF object.");
-        return close_xdp_state(state);
-    }
-
-    // Find the XDP program.
-    struct bpf_program *prog = bpf_object__find_program_by_name(state->obj, "xdp_softgre_ap");
-    if (!prog) {
-        log_error("Failed to find XDP program.");
-        return close_xdp_state(state);
-    }
-
-    // Find the MAC map and clear it.
-    struct bpf_map *mac_map = bpf_object__find_map_by_name(state->obj, "mac_map");
-    if (!mac_map) {
-        log_error("Failed to find MAC BPF map.");
-        return close_xdp_state(state);
-    }
-    try_clear_bpf_map(mac_map, ETH_ALEN);
-
-    // Find the IP set and clear it.
-    // struct bpf_map *ip_set = bpf_object__find_map_by_name(state->obj, "ip_set");
-    // if (!ip_set) {
-    //     log_error("Failed to find IP BPF map.");
-    //     return close_xdp_state(state);
-    // }
-    // try_clear_bpf_map(ip_set, sizeof(struct in_addr));
-
-    // Attach the XDP program to each interface.
-    int successful_attachments = 0;
-    for (int i = 0; i < num_ifs; i++) {
-        int ifindex = if_nametoindex(ifs[i]);
-        if (ifindex == 0) {
-            log_errno("if_nametoindex");
-            log_error("Failed to find interface %s.", ifs[i]);
-            state->ifindexes[i] = -1;
-            continue;
-        }
-
-        struct bpf_link *link = bpf_program__attach_xdp(prog, ifindex);
-        state->links[i] = link;
-        if (link) {
-            log_info("Attached to interface %s (ifindex %d)", ifs[i], ifindex);
-            successful_attachments++;
-        } else {
-            log_errno("bpf_program__attach_xdp");
-            log_error("Failed to attach XDP program to interface %s.", ifs[i]);
-            continue;
-        }
-    }
-
-    if (successful_attachments == 0) {
-        log_error("Failed to attach XDP program to any interface.");
-        return close_xdp_state(state);
-    }
-
-    return state;
-}
-
-struct DeviceList parse_map_file(const char *path) {
-    struct DeviceList list = device_list__new();
-    if (!list.devices) {
-        return list;
     }
 
     FILE *fp = fopen(path, "r");
@@ -235,28 +96,38 @@ struct DeviceList parse_map_file(const char *path) {
     return list;
 }
 
-void update_bpf_map(struct xdp_state *state, const char *map_path) {
-    if (!state || !state->obj) { return; }
+void update_bpf_map(struct XDPState *state, const char *map_path) {
+    if (!state) {
+        log_error("XDP state is NULL.");
+        return;
+    }
+
+    if (!state->obj) {
+        log_error("XDP state obj doesn't exist.");
+        return;
+    }
 
     // Get the map objects.
-    struct bpf_map *mac_map = bpf_object__find_map_by_name(state->obj, "mac_map");
+    struct bpf_map *mac_map = xdp_state__get_mac_map(state);
     if (!mac_map) { return; }
     // struct bpf_map *ip_set = bpf_object__find_map_by_name(state->obj, "ip_set");
     // if (!ip_set) { return; }
 
     // Get parsed map file.
-    struct DeviceList device_list = parse_map_file(map_path);
-    if (!device_list.length) { return; }
+    struct DeviceList *device_list = parse_map_file(map_path);
+    if (!device_list || device_list->length == 0) {
+        device_list__free(device_list);
+        return;
+    }
 
     // Clear BPF maps.
-    // TODO: Improve this to be more performant by iterating over the map and removing entries not
-    // present in the new device list.
-    try_clear_bpf_map(mac_map, ETH_ALEN);
-    // try_clear_bpf_map(ip_set, sizeof(struct in_addr));
+    // TODO: Improve this; currently we just clear the map which is hacky.
+    clear_bpf_map(mac_map, ETH_ALEN);
+    // clear_bpf_map(ip_set, sizeof(struct in_addr));
 
     // Update the BPF map with the new devices.
-    for (int i = 0; i < device_list.length; i++) {
-        struct Device device = device_list.devices[i];
+    for (unsigned int i = 0; i < device_list->length; i++) {
+        struct Device device = device_list->devices[i];
         bpf_map__update_elem(
             mac_map, &device.mac, sizeof(device.mac), &device, sizeof(device), BPF_ANY
         );
@@ -366,6 +237,7 @@ int main(int argc, char *argv[]) {
             } else {
                 fclose(fp);
             }
+            break;
         case 'V':
             printf("%s\n", version);
             exit(0);
@@ -408,16 +280,18 @@ int main(int argc, char *argv[]) {
     char **ifs = argv + optind;
 
     // Load the XDP program onto selected interfaces.
-    struct xdp_state *state = load_xdp_program(xdp_path, num_ifs, ifs);
-    if (!state) {
+    struct XDPState state = xdp_state__new();
+    log_info("Loading XDP program...");
+    bool load_success = xdp_state__open(state, xdp_path, num_ifs, ifs);
+    if (!load_success) {
         log_error("Failed to load XDP program.");
         exit(1);
     }
 
-    int res = watch(map_path, &update_bpf_map, state, map_path);
+    bool watch_success = watch(map_path, &update_bpf_map, state, map_path);
 
     log_info("Unloading XDP program...");
-    state = close_xdp_state(state);
+    xdp_state__close(state);
 
-    return res;
+    return watch_success ? 0 : 1;
 }

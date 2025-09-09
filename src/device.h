@@ -1,11 +1,12 @@
 // Detect BPF compilation context.
 #ifdef __BPF__
-    /* BPF/XDP program: use kernel headers. */
-    #include <linux/in.h>
+/* BPF/XDP program: use kernel headers. */
+#include <linux/in.h>
+#include <linux/if_ether.h>
 #else
-    /* Userspace program: use standard library headers. */
-    #include <netinet/in.h>
-    #include <netinet/ether.h>
+/* Userspace program: use standard library headers. */
+#include <netinet/in.h>
+#include <netinet/ether.h>
 #endif
 
 #define MAX_DEVICES 2048

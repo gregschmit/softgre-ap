@@ -24,15 +24,15 @@ struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, MAX_DEVICES);
     __uint(key_size, ETH_ALEN);
-    __uint(value_size, sizeof(struct Device));
+    __type(value, struct Device);
 } mac_map SEC(".maps");
 
 // Shared set of endpoint IPs (needed for Ethernet Broadcast Frames).
 // struct {
 //     __uint(type, BPF_MAP_TYPE_HASH);
 //     __uint(max_entries, MAX_DEVICES);  // Would never be larger than the amount of devices.
-//     __uint(key_size, sizeof(struct in_addr));
-//     __uint(value_size, 1);
+//     __type(key, struct in_addr);
+//     __type(value, bool);
 // } ip_set SEC(".maps");
 
 static inline int mac_eq(const __u8 *mac1, const __u8 *mac2) {

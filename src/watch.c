@@ -1,4 +1,3 @@
-#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -12,6 +11,7 @@
 #include <sys/inotify.h>
 
 #include "log.h"
+
 #include "watch.h"
 
 #define EVENT_SIZE (sizeof(struct inotify_event))
@@ -23,18 +23,15 @@ extern volatile int interrupt;
 /*
  * Watch the specified file for changes and execute the callback when a change is detected.
  */
-int watch(char *filepath, void (*callback)(), ...) {
+bool watch(char *filepath, callback_t callback, struct XDPState *state, const char *map_path) {
     char *fn = basename(filepath);
     char *dn = dirname(filepath);
-
-    va_list args;
-    va_start(args, callback);
 
     // Initialize `inotify`.
     int fd = inotify_init();
     if (fd < 0) {
         log_errno("inotify_init");
-        return 1;
+        return false;
     }
 
     // Combine `dn` and `fn` to get the `fullpath`.
@@ -79,10 +76,7 @@ int watch(char *filepath, void (*callback)(), ...) {
         }
 
         // Now we definitely have a watch descriptor; wait for an event:
-        struct pollfd pfd = {
-            .fd = fd,
-            .events = POLLIN
-        };
+        struct pollfd pfd = {.fd = fd, .events = POLLIN};
         int res = poll(&pfd, 1, TIMEOUT * 1000);
         if (res < 0) {
             dbg_errno("poll");
@@ -119,13 +113,13 @@ int watch(char *filepath, void (*callback)(), ...) {
                 if (event->len > 0 && strcmp(event->name, fn) == 0) {
                     if (event->mask & IN_CREATE) {
                         dbg("%s created", event->name);
-                        (*callback)(args);
+                        callback(state, map_path);
                         inotify_rm_watch(fd, wd);
                         wd = -1;
                         break;
                     } else if (event->mask & IN_MOVED_TO) {
                         dbg("%s moved in", event->name);
-                        (*callback)(args);
+                        callback(state, map_path);
                         inotify_rm_watch(fd, wd);
                         wd = -1;
                         break;
@@ -134,16 +128,16 @@ int watch(char *filepath, void (*callback)(), ...) {
             } else {
                 if (event->mask & IN_MODIFY) {
                     dbg("%s modified", fullpath);
-                    (*callback)(args);
+                    callback(state, map_path);
                 } else if (event->mask & IN_MOVE_SELF) {
                     dbg("%s moved out", fullpath);
-                    (*callback)(args);
+                    callback(state, map_path);
                     inotify_rm_watch(fd, wd);
                     wd = -1;
                     break;
                 } else if (event->mask & IN_DELETE_SELF) {
                     dbg("%s deleted", fullpath);
-                    (*callback)(args);
+                    callback(state, map_path);
                     inotify_rm_watch(fd, wd);
                     wd = -1;
                     break;
@@ -154,13 +148,11 @@ int watch(char *filepath, void (*callback)(), ...) {
         }
     }
 
-    va_end(args);
-
     // Cleanup.
     if (wd >= 0) {
         inotify_rm_watch(fd, wd);
     }
     close(fd);
 
-    return 0;
+    return true;
 }
