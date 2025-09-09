@@ -139,13 +139,13 @@ struct xdp_state *load_xdp_program(char *xdp_path, int num_ifs, char **ifs) {
     }
     try_clear_bpf_map(mac_map, ETH_ALEN);
 
-    // Find the IP map and clear it.
-    struct bpf_map *ip_map = bpf_object__find_map_by_name(state->obj, "ip_map");
-    if (!ip_map) {
+    // Find the IP set and clear it.
+    struct bpf_map *ip_set = bpf_object__find_map_by_name(state->obj, "ip_set");
+    if (!ip_set) {
         log_error("Failed to find IP BPF map.");
         return close_xdp_state(state);
     }
-    try_clear_bpf_map(ip_map, sizeof(struct in_addr));
+    try_clear_bpf_map(ip_set, sizeof(struct in_addr));
 
     // Attach the XDP program to each interface.
     int successful_attachments = 0;
@@ -241,8 +241,8 @@ void update_bpf_map(struct xdp_state *state, const char *map_path) {
     // Get the map objects.
     struct bpf_map *mac_map = bpf_object__find_map_by_name(state->obj, "mac_map");
     if (!mac_map) { return; }
-    struct bpf_map *ip_map = bpf_object__find_map_by_name(state->obj, "ip_map");
-    if (!ip_map) { return; }
+    struct bpf_map *ip_set = bpf_object__find_map_by_name(state->obj, "ip_set");
+    if (!ip_set) { return; }
 
     // Get parsed map file.
     struct DeviceList device_list = parse_map_file(map_path);
@@ -252,7 +252,7 @@ void update_bpf_map(struct xdp_state *state, const char *map_path) {
     // TODO: Improve this to be more performant by iterating over the map and removing entries not
     // present in the new device list.
     try_clear_bpf_map(mac_map, ETH_ALEN);
-    try_clear_bpf_map(ip_map, sizeof(struct in_addr));
+    try_clear_bpf_map(ip_set, sizeof(struct in_addr));
 
     // Update the BPF map with the new devices.
     for (int i = 0; i < device_list.length; i++) {
@@ -261,7 +261,7 @@ void update_bpf_map(struct xdp_state *state, const char *map_path) {
             mac_map, &device.mac, sizeof(device.mac), &device, sizeof(device), BPF_ANY
         );
         bpf_map__update_elem(
-            ip_map, &device.ip, sizeof(device.ip), &device, sizeof(device), BPF_ANY
+            ip_set, &device.ip, sizeof(device.ip), &device, sizeof(device), BPF_ANY
         );
     }
 
