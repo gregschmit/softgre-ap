@@ -40,9 +40,9 @@ struct {
 
 static inline __u8 mac_eq(const __u8 *mac1, const __u8 *mac2) {
     for (int i = 0; i < ETH_ALEN; i++) {
-        if (mac1[i] != mac2[i]) { return false; }
+        if (mac1[i] != mac2[i]) { return 0; }
     }
-    return true;
+    return 1;
 }
 
 SEC("xdp")
