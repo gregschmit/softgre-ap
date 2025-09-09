@@ -258,9 +258,11 @@ void update_bpf_map(struct xdp_state *state, const char *map_path) {
     for (int i = 0; i < device_list.length; i++) {
         struct Device device = device_list.devices[i];
         bpf_map__update_elem(
-            map, &device.mac, sizeof(device.mac), &device, sizeof(device), BPF_ANY
+            mac_map, &device.mac, sizeof(device.mac), &device, sizeof(device), BPF_ANY
         );
-        bpf_map__update_elem(map, &device.ip, sizeof(device.ip), &device, sizeof(device), BPF_ANY);
+        bpf_map__update_elem(
+            ip_map, &device.ip, sizeof(device.ip), &device, sizeof(device), BPF_ANY
+        );
     }
 
     device_list__free(device_list);
