@@ -286,8 +286,8 @@ int main(int argc, char *argv[]) {
 
     // Load the XDP program onto selected interfaces.
     log_info("Loading XDP program (xdp: %s, map: %s)...", xdp_path, map_path);
-    log_debug("XDP Program: %s", xdp_path);
-    log_debug("Map File: %s", map_path);
+    dbg("XDP Program: %s", xdp_path);
+    dbg("Map File: %s", map_path);
     struct XDPState *state = xdp_state__open(xdp_path, num_ifs, ifs);
     if (!state) {
         log_error("Failed to load XDP program.");
