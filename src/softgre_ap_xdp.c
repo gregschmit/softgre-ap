@@ -55,24 +55,24 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end) { return XDP_PASS; }
 
-    #ifdef DEBUGTEST
-    struct Device *d = bpf_map_lookup_elem(&mac_map, &eth->h_source);
-    if (d) {
-        bpf_printk(
-            "softgre_apd: packet found from device %02x:%02x:%02x:%02x:%02x:%02x (src_ip: %pI4 dst_ip: %pI4 vlan: %d",
-            eth->h_source[0],
-            eth->h_source[1],
-            eth->h_source[2],
-            eth->h_source[3],
-            eth->h_source[4],
-            eth->h_source[5],
-            &d->src_ip,
-            &d->dst_ip,
-            d->vlan
-        );
+    if (DEBUGTEST) {
+        struct Device *d = bpf_map_lookup_elem(&mac_map, &eth->h_source);
+        if (d) {
+            bpf_printk(
+                "softgre_apd: packet found from device %02x:%02x:%02x:%02x:%02x:%02x (src_ip: %pI4 dst_ip: %pI4 vlan: %d",
+                eth->h_source[0],
+                eth->h_source[1],
+                eth->h_source[2],
+                eth->h_source[3],
+                eth->h_source[4],
+                eth->h_source[5],
+                &d->src_ip,
+                &d->dst_ip,
+                d->vlan
+            );
+        }
+        return XDP_PASS;
     }
-    return XDP_PASS;
-    #endif
 
     // Encapsulation:
     // If the source MAC is in the MAC map, then it's coming from a client, so we should encapsulate
