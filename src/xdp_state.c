@@ -136,6 +136,11 @@ struct bpf_map *xdp_state__get_mac_map(struct XDPState *state) {
     return bpf_object__find_map_by_name(state->obj, "mac_map");
 }
 
+struct bpf_map *xdp_state__get_ip_set(struct XDPState *state) {
+    if (!state || !state->obj) { return NULL; }
+    return bpf_object__find_map_by_name(state->obj, "ip_set");
+}
+
 void clear_bpf_map(struct bpf_map *map, unsigned int key_size) {
     if (!map) { return; }
 

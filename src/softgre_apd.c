@@ -160,8 +160,11 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
         log_error("Failed to get MAC map.");
         return;
     }
-    // struct bpf_map *ip_set = bpf_object__find_map_by_name(state->obj, "ip_set");
-    // if (!ip_set) { return; }
+    struct bpf_map *ip_set = xdp_state__get_ip_set(state);
+    if (!ip_set) {
+        log_error("Failed to get IP set.");
+        return;
+    }
 
     // Get parsed map file.
     struct DeviceList *device_list = parse_map_file(map_path);
@@ -173,7 +176,7 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
     // Clear BPF maps.
     // TODO: Improve this; currently we just clear the map which is hacky.
     clear_bpf_map(mac_map, ETH_ALEN);
-    // clear_bpf_map(ip_set, sizeof(struct in_addr));
+    clear_bpf_map(ip_set, sizeof(struct in_addr));
 
     // Update the BPF map with the new devices.
     for (unsigned int i = 0; i < device_list->length; i++) {
@@ -181,9 +184,9 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
         bpf_map__update_elem(
             mac_map, &device.mac, sizeof(device.mac), &device, sizeof(device), BPF_ANY
         );
-        // bpf_map__update_elem(
-        //     ip_set, &device.ip, sizeof(device.ip), &device, sizeof(device), BPF_ANY
-        // );
+        bpf_map__update_elem(
+            ip_set, &device.ip, sizeof(device.ip), &true, sizeof(bool), BPF_ANY
+        );
     }
 
     device_list__free(device_list);

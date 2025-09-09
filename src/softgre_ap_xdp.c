@@ -29,18 +29,18 @@ struct {
 } mac_map SEC(".maps");
 
 // Shared set of endpoint IPs (needed for Ethernet Broadcast Frames).
-// struct {
-//     __uint(type, BPF_MAP_TYPE_HASH);
-//     __uint(max_entries, MAX_DEVICES);  // Would never be larger than the amount of devices.
-//     __type(key, struct in_addr);
-//     __type(value, bool);
-// } ip_set SEC(".maps");
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MAX_DEVICES);  // Would never be larger than the amount of devices.
+    __type(key, struct in_addr);
+    __type(value, bool);
+} ip_set SEC(".maps");
 
-static inline int mac_eq(const __u8 *mac1, const __u8 *mac2) {
+static inline bool mac_eq(const __u8 *mac1, const __u8 *mac2) {
     for (int i = 0; i < ETH_ALEN; i++) {
-        if (mac1[i] != mac2[i]) { return 0; }
+        if (mac1[i] != mac2[i]) { return false; }
     }
-    return 1;
+    return true;
 }
 
 SEC("xdp")
@@ -48,33 +48,37 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;
 
-    // Check we can get a valid Ethernet header.
+    // Check for valid Ethernet header.
     struct ethhdr *eth = data;
     if ((void *)(eth + 1) > data_end) { return XDP_PASS; }
 
     // Encapsulation:
     // If the source MAC is in the MAC map, then it's coming from a client, so we should encapsulate
     // the frame in an IP/GRE header and pass it up the stack.
-    struct Device *d = bpf_map_lookup_elem(&mac_map, &eth->h_source);
-    if (d) {
+    struct Device *src_device = bpf_map_lookup_elem(&mac_map, &eth->h_source);
+    if (src_device) {
         bpf_printk("softgre_apd: encapsulate");
+        unsigned short payload_size = data_end - data;
 
         // First, expand packet to cover both GRE header and IP header.
-        int expand_size = sizeof(struct gre_base_hdr) + sizeof(struct iphdr);
+        // NOTE: Assumes minimal (ihl=5) IP header.
+        unsigned short expand_size = sizeof(struct gre_base_hdr) + sizeof(struct iphdr);
         if (bpf_xdp_adjust_head(ctx, -expand_size)) {
             bpf_printk("softgre_apd: bpf_xdp_adjust_head failed");
             return XDP_ABORTED;
         }
 
         // Write IP Header at start of new head.
+        // NOTE: This is a minimal IPv4 header (ihl=5).
         struct iphdr *ip = (struct iphdr *)data;
+        // __builtin_memset(ip, 0, sizeof(struct iphdr));  // Not sure if I need to zero this.
         ip->version = 4;
         ip->ihl = 5;
-        ip->tot_len = bpf_htons(sizeof(struct iphdr));
+        ip->tot_len = bpf_htons(expand_size + payload_size);
         ip->protocol = IPPROTO_GRE;
-        ip->check = 0;
-        ip->saddr = d->src_ip.s_addr;
-        ip->daddr = d->dst_ip.s_addr;
+        ip->check = 0;  // Not sure if I need to calculate this.
+        ip->saddr = src_device->src_ip.s_addr;
+        ip->daddr = src_device->dst_ip.s_addr;
 
         // Write GRE Header after IP header.
         struct gre_base_hdr *gre = (struct gre_base_hdr *)(ip + 1);
@@ -91,29 +95,55 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
     // decapsulation and pass it up the stack. If that's not the case, then we should forward it
     // unmodified up the stack to ensure we don't interfere with another perhaps static GRE tunnel.
 
-    // TODO: Check IP version is IPPROTO_GRE to determine if GRE Header is present.
+    // Check (untagged) IP EtherType.
+    if (bpf_ntohs(eth->h_proto) != ETH_P_IP) { return XDP_PASS; }
 
-    // // Check (untagged) IP EtherType.
-    // if (bpf_ntohs(eth->h_proto) != ETH_P_IP) { return XDP_PASS; }
+    // Check for valid IP header.
+    struct iphdr *ip = (struct iphdr *)(eth + 1);
+    if ((void *)(ip + 1) > data_end) { return XDP_PASS; }
 
-    // // Check we can get a valid IP header.
-    // struct iphdr *ip = (struct iphdr *)(eth + 1);
-    // if ((void *)(ip + 1) > data_end) { return XDP_PASS; }
+    // Verify it's a minimal IPv4 GRE packet.
+    // TODO: Need to verify that all softgre packets will be minimal?
+    if (ip->version != 4) { return XDP_PASS; }
+    if (ip->ihl != 5) { return XDP_PASS; }
+    if (ip->protocol != IPPROTO_GRE) { return XDP_PASS; }
 
-    // // Verify it's actually an IPv4 packet.
-    // if (ip->version != 4) { return XDP_PASS; }
+    // Check for valid simple GRE header with all zeroes.
+    struct gre_base_hdr *gre = (void *)ip + (ip->ihl * 4);
+    if ((void *)(gre + 1) > data_end) { return XDP_PASS; }
+    if (gre->flags != 0 || gre->protocol != 0) { return XDP_PASS; }
 
-    // // Get the IP packet payload, up to the end of the data.
-    // void *ip_payload = (void *)ip + (ip->ihl * 4);
-    // if (ip_payload > data_end) { return XDP_PASS; }
+    // Check source IP is in the IP set.
+    if (!bpf_map_lookup_elem(&ip_set, &ip->saddr)) {
+        bpf_printk("softgre_apd: source IP not in set");
+        return XDP_PASS;
+    }
 
-    // // Check if source MAC matches a map entry.
-    // struct Device *d = bpf_map_lookup_elem(&mac_map, &eth->h_source);
-    // if (d) {
-    //     bpf_printk("gns: found device for mac");
-    // }
+    // Get the IP packet payload, up to the end of the data.
+    void *inner_frame = (void *)(gre + 1);
+    if (inner_frame >= data_end) { return XDP_PASS; }
+
+    // Get the inner Ethernet header.
+    struct ethhdr *inner_eth = inner_frame;
+    if ((void *)(inner_eth + 1) > data_end) { return XDP_PASS; }
+
+    struct Device *dst_device = bpf_map_lookup_elem(&mac_map, &inner_eth->h_dest);
+    bool bcast = mac_eq(inner_eth->h_dest, (const __u8 [])ETH_BCAST_MAC);
+    if (dst_device || bcast) {
+        bpf_printk("softgre_apd: decapsulate");
+
+        // Shrink packet to remove GRE and IP headers.
+        // NOTE: Assumes minimal (ihl=5) IP header.
+        unsigned short shrink_size = sizeof(struct gre_base_hdr) + sizeof(struct iphdr);
+        if (bpf_xdp_adjust_head(ctx, shrink_size)) {
+            bpf_printk("softgre_apd: bpf_xdp_adjust_head failed");
+            return XDP_ABORTED;
+        }
+
+        return XDP_PASS;
+    }
 
     return XDP_PASS;
 }
 
-char _license[] SEC("license") = "Proprietary";
+char _license[] SEC("license") = "GPL";
