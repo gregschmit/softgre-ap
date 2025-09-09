@@ -9,16 +9,18 @@
 #include <linux/if_vlan.h>
 #include <linux/in.h>
 #include <linux/ip.h>
-#include <linux/gre.h>
 
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
 #include "device.h"
 
-#define ETH_P_8021Q 0x8100
-#define ETH_P_IPV4 0x0800
 #define ETH_BCAST_MAC {0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
+
+struct gre_base_hdr {
+    __be16 flags;
+    __be16 protocol;
+};
 
 // Shared map for MAC to Device mappings.
 struct {
@@ -33,10 +35,10 @@ struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, MAX_DEVICES);  // Would never be larger than the amount of devices.
     __type(key, struct in_addr);
-    __type(value, bool);
+    __type(value, __u8);
 } ip_set SEC(".maps");
 
-static inline bool mac_eq(const __u8 *mac1, const __u8 *mac2) {
+static inline __u8 mac_eq(const __u8 *mac1, const __u8 *mac2) {
     for (int i = 0; i < ETH_ALEN; i++) {
         if (mac1[i] != mac2[i]) { return false; }
     }
@@ -133,7 +135,7 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
     if ((void *)(inner_eth + 1) > data_end) { return XDP_PASS; }
 
     struct Device *dst_device = bpf_map_lookup_elem(&mac_map, &inner_eth->h_dest);
-    bool bcast = mac_eq(inner_eth->h_dest, (const __u8 [])ETH_BCAST_MAC);
+    __u8 bcast = mac_eq(inner_eth->h_dest, (const __u8 [])ETH_BCAST_MAC);
     if (dst_device || bcast) {
         bpf_printk("softgre_apd: decapsulate");
 
