@@ -280,10 +280,9 @@ int main(int argc, char *argv[]) {
     char **ifs = argv + optind;
 
     // Load the XDP program onto selected interfaces.
-    struct XDPState state = xdp_state__new();
     log_info("Loading XDP program...");
-    bool load_success = xdp_state__open(state, xdp_path, num_ifs, ifs);
-    if (!load_success) {
+    struct XDPState *state = xdp_state__open(xdp_path, num_ifs, ifs);
+    if (!state) {
         log_error("Failed to load XDP program.");
         exit(1);
     }

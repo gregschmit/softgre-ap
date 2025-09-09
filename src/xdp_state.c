@@ -1,5 +1,9 @@
 #include <stdlib.h>
 
+#include <netinet/ether.h>
+#include <netinet/in.h>
+#include <net/if.h>
+
 #include "log.h"
 
 #include "xdp_state.h"
