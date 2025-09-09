@@ -24,7 +24,7 @@ struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, MAX_DEVICES);
     __uint(key_size, ETH_ALEN);
-    __type(value, struct Device);
+    __uint(value_size, sizeof(struct Device));
 } mac_map SEC(".maps");
 
 // Shared set of endpoint IPs (needed for Ethernet Broadcast Frames).
@@ -64,7 +64,7 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
     // Check if source MAC matches a map entry.
     struct Device *d = bpf_map_lookup_elem(&mac_map, &eth->h_source);
     if (d) {
-        bpf_printk("gns: found packet!");
+        bpf_printk("gns: found device for mac");
     }
 
     return XDP_PASS;

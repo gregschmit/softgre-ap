@@ -93,6 +93,8 @@ struct DeviceList *parse_map_file(const char *path) {
         device_list__add(list, device);
     }
 
+    fclose(fp);
+
     return list;
 }
 
@@ -109,7 +111,10 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
 
     // Get the map objects.
     struct bpf_map *mac_map = xdp_state__get_mac_map(state);
-    if (!mac_map) { return; }
+    if (!mac_map) {
+        log_error("Failed to get MAC map.");
+        return;
+    }
     // struct bpf_map *ip_set = bpf_object__find_map_by_name(state->obj, "ip_set");
     // if (!ip_set) { return; }
 
@@ -280,14 +285,20 @@ int main(int argc, char *argv[]) {
     char **ifs = argv + optind;
 
     // Load the XDP program onto selected interfaces.
-    log_info("Loading XDP program...");
+    log_info("Loading XDP program (xdp: %s, map: %s)...", xdp_path, map_path);
+    log_debug("XDP Program: %s", xdp_path);
+    log_debug("Map File: %s", map_path);
     struct XDPState *state = xdp_state__open(xdp_path, num_ifs, ifs);
     if (!state) {
         log_error("Failed to load XDP program.");
         exit(1);
     }
 
-    bool watch_success = watch(map_path, &update_bpf_map, state, map_path);
+    // Initial map load.
+    update_bpf_map(state, map_path);
+
+    // Watch the map file for changes.
+    bool watch_success = watch(map_path, &update_bpf_map, state);
 
     log_info("Unloading XDP program...");
     xdp_state__close(state);

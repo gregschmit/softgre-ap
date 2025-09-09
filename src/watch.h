@@ -7,6 +7,6 @@
 
 typedef void (*callback_t)(struct XDPState *state, const char *map_path);
 
-bool watch(char *filepath, callback_t callback, struct XDPState *state, const char *map_path);
+bool watch(const char *filepath, callback_t callback, struct XDPState *state);
 
 #endif  // WATCH_H
