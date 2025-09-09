@@ -24,6 +24,12 @@ extern volatile int interrupt;
  * Watch the specified file for changes and execute the callback when a change is detected.
  */
 bool watch(const char *map_path, callback_t callback, struct XDPState *state) {
+    int map_path_len = strlen(map_path);
+    if (map_path_len == 0 || map_path_len >= PATH_MAX) {
+        log_error("Invalid map path.");
+        return false;
+    }
+
     // Extract the directory name and file name without modifying `map_path`.
     char tmp[PATH_MAX + 1];
     strncpy(tmp, map_path, sizeof(tmp));

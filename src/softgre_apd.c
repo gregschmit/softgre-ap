@@ -174,7 +174,8 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
     }
 
     // Clear BPF maps.
-    // TODO: Improve this; currently we just clear the map which is hacky.
+    // TODO: Improve this to use incremental updates; currently we just clear the map which isn't
+    // efficient and causes a brief outage during updates.
     xdp_state__clear_mac_map(state);
     xdp_state__clear_ip_set(state);
 

@@ -1,4 +1,5 @@
 #include <stdlib.h>
+#include <string.h>
 
 #include <netinet/ether.h>
 #include <netinet/in.h>
@@ -91,15 +92,16 @@ struct XDPState *xdp_state__open(char *xdp_path, int num_ifs, char **ifs) {
         xdp_state__close(state);
         return NULL;
     }
-    clear_bpf_map(mac_map, ETH_ALEN);
+    xdp_state__clear_mac_map(state);
 
     // Find the IP set and clear it.
-    struct bpf_map *ip_set = bpf_object__find_map_by_name(state.obj, "ip_set");
+    struct bpf_map *ip_set = bpf_object__find_map_by_name(state->obj, "ip_set");
     if (!ip_set) {
         log_error("Failed to find IP BPF map.");
-        return close_xdp_state(state);
+        xdp_state__close(state);
+        return NULL;
     }
-    clear_bpf_map(ip_set, sizeof(struct in_addr));
+    xdp_state__clear_ip_set(state);
 
     // Attach the XDP program to each interface.
     int successful_attachments = 0;

@@ -44,6 +44,12 @@ bool device_list__add(struct DeviceList *list, struct Device device) {
 
     // Double the device list size, if necessary.
     if (list->length >= list->size) {
+        // Check for arithmetic overflow.
+        if (list->size > (UINT_MAX / 2)) {
+            log_error("Device list size overflow.");
+            return false;
+        }
+
         unsigned int new_size = list->size * 2;
 
         // Should never happen unless device list struct is manually modified.

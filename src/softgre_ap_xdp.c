@@ -81,7 +81,7 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
         ip->tot_len = bpf_htons(outer_size + inner_size);
         ip->ttl = 64;  // Common default TTL.
         ip->protocol = IPPROTO_GRE;
-        ip->check = 0;
+        ip->check = 0;  // TODO: Calculate proper checksum.
         ip->saddr = src_device->src_ip.s_addr;
         ip->daddr = src_device->dst_ip.s_addr;
 
@@ -113,10 +113,10 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
     if (ip->ihl != 5) { return XDP_PASS; }
     if (ip->protocol != IPPROTO_GRE) { return XDP_PASS; }
 
-    // Check for valid simple GRE header with all zeroes.
+    // Check for valid simple GRE header with no flags and protocol TEB.
     struct gre_base_hdr *gre = (void *)ip + (ip->ihl * 4);
     if ((void *)(gre + 1) > data_end) { return XDP_PASS; }
-    if (gre->flags != 0 || gre->protocol != 0) { return XDP_PASS; }
+    if (gre->flags != 0 || gre->protocol != bpf_htons(ETH_P_TEB)) { return XDP_PASS; }
 
     // Check source IP is in the IP set.
     if (!bpf_map_lookup_elem(&ip_set, &ip->saddr)) {
