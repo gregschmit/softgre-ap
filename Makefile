@@ -12,7 +12,12 @@ softgre_apd: src/softgre_apd.o src/device.o src/device/list.o src/log.o src/watc
 
 dev: softgre_ap_xdp.o softgre_apd
 	@echo "Running dev configuration..."
-	./softgre_apd -df -m ./softgre_ap_map.conf wlx54c9ff02cfb5
+	sudo ./softgre_apd -df -m ./softgre_ap_map.conf wlx54c9ff02cfb5
+
+.PHONY: tidy
+tidy:
+	clang-tidy -checks='misc-include-cleaner' src/softgre_ap_xdp.c -- -target bpf $(CFLAGS)
+	clang-tidy -checks='misc-include-cleaner' src/softgre_apd.c -- $(CFLAGS)
 
 .PHONY: clean
 clean:
