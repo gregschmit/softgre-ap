@@ -5,15 +5,14 @@
  * updated.
  */
 
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <unistd.h>
-
 #include <errno.h>
 #include <limits.h>
 #include <signal.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -191,8 +190,9 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
             log_error("Failed to update MAC map (%d).", res);
         }
 
+        bool t = 1;
         res = bpf_map__update_elem(
-            ip_set, &device.dst_ip, sizeof(device.dst_ip), &true, sizeof(bool), BPF_ANY
+            ip_set, &device.dst_ip, sizeof(device.dst_ip), &t, sizeof(t), BPF_ANY
         );
         if (res) {
             log_error("Failed to update IP set (%d).", res);
