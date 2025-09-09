@@ -16,7 +16,8 @@
 
 struct Device {
     unsigned char mac[ETH_ALEN];
-    struct in_addr ip;
+    struct in_addr src_ip;
+    struct in_addr dst_ip;
     unsigned short vlan;
 };
 

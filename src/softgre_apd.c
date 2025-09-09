@@ -39,6 +39,46 @@ void interrupt_handler(int _signum) {
     interrupt = 1;
 }
 
+bool get_source_ip(struct in_addr dest_ip, struct in_addr* source_ip) {
+    int sockfd;
+    struct sockaddr_in dest_addr, src_addr;
+    socklen_t src_addr_len = sizeof(src_addr);
+
+    // Create UDP socket.
+    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0) {
+        log_errno("socket");
+        return false;
+    }
+
+    // Set up destination address.
+    memset(&dest_addr, 0, sizeof(dest_addr));
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(53); // DNS port, but any port works.
+    dest_addr.sin_addr = dest_ip;
+
+    // Connect to destination (this doesn't actually send packets for UDP).
+    if (connect(sockfd, (struct sockaddr*)&dest_addr, sizeof(dest_addr)) < 0) {
+        log_errno("connect");
+        close(sockfd);
+        return false;
+    }
+
+    // Get the local address the kernel assigned.
+    if (getsockname(sockfd, (struct sockaddr*)&src_addr, &src_addr_len) < 0) {
+        log_errno("getsockname");
+        close(sockfd);
+        return false;
+    }
+
+    // Copy the source IP.
+    *source_ip = src_addr.sin_addr;
+
+    close(sockfd);
+
+    return true;
+}
+
 struct DeviceList *parse_map_file(const char *path) {
     struct DeviceList *list = device_list__new();
     if (!list) {
@@ -85,8 +125,13 @@ struct DeviceList *parse_map_file(const char *path) {
             continue;
         }
 
-        if (!inet_pton(AF_INET, ip, &device.ip)) {
-            log_error("Failed to parse IP address: `%s`", ip);
+        if (!inet_pton(AF_INET, ip, &device.dst_ip)) {
+            log_error("Failed to parse dst IP: `%s`", ip);
+            continue;
+        }
+
+        if (!get_source_ip(device.dst_ip, &device.src_ip)) {
+            log_error("Failed to determine src IP for dst IP: `%s`", ip);
             continue;
         }
 
