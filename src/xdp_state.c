@@ -94,12 +94,12 @@ struct XDPState *xdp_state__open(char *xdp_path, int num_ifs, char **ifs) {
     clear_bpf_map(mac_map, ETH_ALEN);
 
     // Find the IP set and clear it.
-    // struct bpf_map *ip_set = bpf_object__find_map_by_name(state.obj, "ip_set");
-    // if (!ip_set) {
-    //     log_error("Failed to find IP BPF map.");
-    //     return close_xdp_state(state);
-    // }
-    // clear_bpf_map(ip_set, sizeof(struct in_addr));
+    struct bpf_map *ip_set = bpf_object__find_map_by_name(state.obj, "ip_set");
+    if (!ip_set) {
+        log_error("Failed to find IP BPF map.");
+        return close_xdp_state(state);
+    }
+    clear_bpf_map(ip_set, sizeof(struct in_addr));
 
     // Attach the XDP program to each interface.
     int successful_attachments = 0;
@@ -141,13 +141,80 @@ struct bpf_map *xdp_state__get_ip_set(struct XDPState *state) {
     return bpf_object__find_map_by_name(state->obj, "ip_set");
 }
 
-void clear_bpf_map(struct bpf_map *map, unsigned int key_size) {
-    if (!map) { return; }
+void xdp_state__clear_mac_map(struct XDPState *state) {
+    struct bpf_map *mac_map = xdp_state__get_mac_map(state);
+    if (!mac_map) { return; }
 
-    void *cur_key = NULL;
-    void *next_key = NULL;
-    while (bpf_map__get_next_key(map, cur_key, next_key, key_size) == 0) {
-        bpf_map__delete_elem(map, next_key, key_size, BPF_ANY);
-        cur_key = next_key;
+    unsigned char key[ETH_ALEN];
+    unsigned char next_key[ETH_ALEN];
+
+    // Get the first key.
+    int res = bpf_map__get_next_key(mac_map, NULL, key, ETH_ALEN);
+    if (res) {
+        if (res != -ENOENT) {
+            log_error("Failed to get first key from MAC map (%d).", res);
+        }
+
+        return;
+    }
+
+    while (res == 0) {
+        // Get the next key before deleting the current key.
+        res = bpf_map__get_next_key(mac_map, key, next_key, ETH_ALEN);
+
+        // Delete the current key.
+        if (bpf_map__delete_elem(mac_map, key, ETH_ALEN, BPF_ANY) != 0) {
+            log_errno("bpf_map__delete_elem");
+            log_error("Failed to delete key from MAC map.");
+            return;
+        }
+
+        // Copy next key to key for the next iteration.
+        if (res == 0) {
+            memcpy(key, next_key, ETH_ALEN);
+        }
+    }
+
+    if (res != -ENOENT) {
+        log_error("Failed to get next key from MAC map.");
+    }
+}
+
+void xdp_state__clear_ip_set(struct XDPState *state) {
+    struct bpf_map *ip_set = xdp_state__get_ip_set(state);
+    if (!ip_set) { return; }
+
+    struct in_addr key;
+    struct in_addr next_key;
+
+    // Get the first key.
+    int res = bpf_map__get_next_key(ip_set, NULL, &key, sizeof(key));
+    if (res) {
+        if (res != -ENOENT) {
+            log_error("Failed to get first key from IP set (%d).", res);
+        }
+
+        return;
+    }
+
+    while (res == 0) {
+        // Get the next key before deleting the current key.
+        res = bpf_map__get_next_key(ip_set, &key, &next_key, sizeof(next_key));
+
+        // Delete the current key.
+        if (bpf_map__delete_elem(ip_set, &key, sizeof(key), BPF_ANY) != 0) {
+            log_errno("bpf_map__delete_elem");
+            log_error("Failed to delete key from IP set.");
+            return;
+        }
+
+        // Copy next key to key for the next iteration.
+        if (res == 0) {
+            key = next_key;
+        }
+    }
+
+    if (res != -ENOENT) {
+        log_error("Failed to get next key from IP set.");
     }
 }

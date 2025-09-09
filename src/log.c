@@ -9,7 +9,7 @@
 extern int debug;
 
 void log_info(const char *msg, ...) {
-    fprintf(stdout, "INFO: ");
+    fprintf(stdout, " INFO: ");
 
     va_list args;
     va_start(args, msg);
@@ -31,7 +31,7 @@ void log_error(const char *msg, ...) {
 }
 
 void log_errno(const char *label) {
-    fprintf(stderr, "DEBUG: (%s) %s\n", label, strerror(errno));
+    fprintf(stderr, "ERROR: (%s) %s\n", label, strerror(errno));
 }
 
 void dbg(const char *msg, ...) {

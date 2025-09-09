@@ -58,32 +58,37 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
     struct Device *src_device = bpf_map_lookup_elem(&mac_map, &eth->h_source);
     if (src_device) {
         bpf_printk("softgre_apd: encapsulate");
-        unsigned short payload_size = data_end - data;
+        unsigned short inner_size = data_end - data;
 
         // First, expand packet to cover both GRE header and IP header.
-        // NOTE: Assumes minimal (ihl=5) IP header.
-        unsigned short expand_size = sizeof(struct gre_base_hdr) + sizeof(struct iphdr);
-        if (bpf_xdp_adjust_head(ctx, -expand_size)) {
+        // NOTE: Assumes we only need space for minimal (ihl=5) IP header.
+        unsigned short outer_size = sizeof(struct gre_base_hdr) + sizeof(struct iphdr);
+        if (bpf_xdp_adjust_head(ctx, -outer_size)) {
             bpf_printk("softgre_apd: bpf_xdp_adjust_head failed");
             return XDP_ABORTED;
         }
 
+        // Must recalculate data pointers after bpf_xdp_adjust_head.
+        data = (void *)(long)ctx->data;
+        data_end = (void *)(long)ctx->data_end;
+
         // Write IP Header at start of new head.
         // NOTE: This is a minimal IPv4 header (ihl=5).
         struct iphdr *ip = (struct iphdr *)data;
-        // __builtin_memset(ip, 0, sizeof(struct iphdr));  // Not sure if I need to zero this.
+        __builtin_memset(ip, 0, sizeof(struct iphdr));
         ip->version = 4;
         ip->ihl = 5;
-        ip->tot_len = bpf_htons(expand_size + payload_size);
+        ip->tot_len = bpf_htons(outer_size + inner_size);
+        ip->ttl = 64;  // Common default TTL.
         ip->protocol = IPPROTO_GRE;
-        ip->check = 0;  // Not sure if I need to calculate this.
+        ip->check = 0;
         ip->saddr = src_device->src_ip.s_addr;
         ip->daddr = src_device->dst_ip.s_addr;
 
         // Write GRE Header after IP header.
         struct gre_base_hdr *gre = (struct gre_base_hdr *)(ip + 1);
         gre->flags = 0;
-        gre->protocol = 0;
+        gre->protocol = bpf_htons(ETH_P_TEB);  // Transparent Ethernet Bridging
 
         return XDP_PASS;
     }
@@ -133,8 +138,7 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
         bpf_printk("softgre_apd: decapsulate");
 
         // Shrink packet to remove GRE and IP headers.
-        // NOTE: Assumes minimal (ihl=5) IP header.
-        unsigned short shrink_size = sizeof(struct gre_base_hdr) + sizeof(struct iphdr);
+        unsigned short shrink_size = sizeof(struct gre_base_hdr) + (ip->ihl * 4);
         if (bpf_xdp_adjust_head(ctx, shrink_size)) {
             bpf_printk("softgre_apd: bpf_xdp_adjust_head failed");
             return XDP_ABORTED;

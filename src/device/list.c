@@ -45,9 +45,12 @@ bool device_list__add(struct DeviceList *list, struct Device device) {
     // Double the device list size, if necessary.
     if (list->length >= list->size) {
         unsigned int new_size = list->size * 2;
+
+        // Should never happen unless device list struct is manually modified.
         if (new_size < INITIAL_DEVICE_LIST_SIZE) {
             new_size = INITIAL_DEVICE_LIST_SIZE;
         }
+
         struct Device *new_devices = realloc(list->devices, new_size * sizeof(struct Device));
         if (!new_devices) {
             log_errno("realloc");

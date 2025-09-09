@@ -39,8 +39,7 @@ bool watch(const char *map_path, callback_t callback, struct XDPState *state) {
 
     // Combine `dn` and `fn` to get the `fullpath`.
     char fullpath[PATH_MAX + 1];
-    int fullpath_len = strlen(dn) + strlen(fn) + 2;
-    snprintf(fullpath, fullpath_len, "%s/%s", dn, fn);
+    snprintf(fullpath, sizeof(fullpath), "%s/%s", dn, fn);
 
     log_info("Watching %s...", fullpath);
 

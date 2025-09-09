@@ -175,18 +175,27 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
 
     // Clear BPF maps.
     // TODO: Improve this; currently we just clear the map which is hacky.
-    clear_bpf_map(mac_map, ETH_ALEN);
-    clear_bpf_map(ip_set, sizeof(struct in_addr));
+    xdp_state__clear_mac_map(state);
+    xdp_state__clear_ip_set(state);
 
     // Update the BPF map with the new devices.
     for (unsigned int i = 0; i < device_list->length; i++) {
         struct Device device = device_list->devices[i];
-        bpf_map__update_elem(
+        int res;
+
+        res = bpf_map__update_elem(
             mac_map, &device.mac, sizeof(device.mac), &device, sizeof(device), BPF_ANY
         );
-        bpf_map__update_elem(
-            ip_set, &device.ip, sizeof(device.ip), &true, sizeof(bool), BPF_ANY
+        if (res) {
+            log_error("Failed to update MAC map (%d).", res);
+        }
+
+        res = bpf_map__update_elem(
+            ip_set, &device.dst_ip, sizeof(device.dst_ip), &true, sizeof(bool), BPF_ANY
         );
+        if (res) {
+            log_error("Failed to update IP set (%d).", res);
+        }
     }
 
     device_list__free(device_list);
@@ -216,8 +225,14 @@ int main(int argc, char *argv[]) {
 
     // If that file doesn't exist, try to find using PATH.
     char *path_env = getenv("PATH");
+    char *path_env_copy = strdup(path_env);
+    if (path_env_copy == NULL) {
+        log_errno("strdup");
+        log_error("Failed to duplicate PATH environment variable.");
+        return 1;
+    }
     if (xdp_path[0] == '\0' && path_env != NULL) {
-        char *path = strtok(path_env, ":");
+        char *path = strtok(path_env_copy, ":");
         while (path != NULL) {
             snprintf(xdp_path, sizeof(xdp_path), "%s/" DEFAULT_XDP, path);
             FILE *fp = fopen(xdp_path, "r");
@@ -229,6 +244,8 @@ int main(int argc, char *argv[]) {
             path = strtok(NULL, ":");
         }
     }
+    free(path_env_copy);
+    path_env_copy = NULL;
 
     int ch;
     char version[256] = "softgre_apd " VERSION;
@@ -262,10 +279,10 @@ int main(int argc, char *argv[]) {
             int map_length = strlen(optarg);
             if (map_length <= 0) {
                 log_error("Invalid map file.");
-                exit(1);
+                return 1;
             } else if (map_length > PATH_MAX) {
                 log_error("Map file path is too long.");
-                exit(1);
+                return 1;
             } else {
                 strcpy(map_path, optarg);
             }
@@ -274,10 +291,10 @@ int main(int argc, char *argv[]) {
             int xdp_length = strlen(optarg);
             if (xdp_length <= 0) {
                 log_error("Invalid XDP program file.");
-                exit(1);
+                return 1;
             } else if (xdp_length > PATH_MAX) {
                 log_error("XDP program file path is too long.");
-                exit(1);
+                return 1;
             } else {
                 strcpy(xdp_path, optarg);
             }
@@ -286,7 +303,7 @@ int main(int argc, char *argv[]) {
             if (fp == NULL) {
                 log_errno("fopen");
                 log_error("XDP program file could not be opened.");
-                exit(1);
+                return 1;
             } else {
                 fclose(fp);
             }
@@ -310,7 +327,7 @@ int main(int argc, char *argv[]) {
     // Check that we have an XDP program.
     if (xdp_path[0] == '\0') {
         log_error("No XDP program found.");
-        exit(1);
+        return 1;
     }
 
     // Check if XDP program can be read.
@@ -318,7 +335,7 @@ int main(int argc, char *argv[]) {
     if (fp == NULL) {
         log_errno("fopen");
         log_error("XDP program file could not be opened.");
-        exit(1);
+        return 1;
     } else {
         fclose(fp);
     }
