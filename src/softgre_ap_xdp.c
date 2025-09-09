@@ -15,56 +15,56 @@
 
 #include "device.h"
 
-// static const unsigned char target_mac[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
-static const unsigned char target_mac[6] = {0xe2, 0x0b, 0x11, 0x8c, 0x75, 0x4b};
+#define ETH_P_8021Q 0x8100
+#define ETH_P_IPV4 0x0800
+#define ETH_BCAST_MAC {0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 
 // Shared map for MAC to Device mappings.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(key_size, MAC_SIZE);
-    __uint(value_size, sizeof(struct Device));
     __uint(max_entries, MAX_DEVICES);
+    __uint(key_size, ETH_ALEN);
+    __uint(value_size, sizeof(struct Device));
 } mac_map SEC(".maps");
 
-#define VLAN_ID 99
-#define ETH_P_8021Q 0x8100
+// Shared set of endpoint IPs (needed for Ethernet Broadcast Frames).
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, MAX_DEVICES);  // Would never be larger than the amount of devices.
+    __uint(key_size, sizeof(struct in_addr));
+    __uint(value_size, 1);
+} ip_set SEC(".maps");
+
+static inline int mac_eq(const __u8 *mac1, const __u8 *mac2) {
+    for (int i = 0; i < ETH_ALEN; i++) {
+        if (mac1[i] != mac2[i]) { return 0; }
+    }
+    return 1;
+}
 
 SEC("xdp")
 int xdp_softgre_ap(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
     void *data = (void *)(long)ctx->data;
+
+    // Check we can get a valid Ethernet header.
     struct ethhdr *eth = data;
+    if ((void *)(eth + 1) > data_end) { return XDP_PASS; }
 
-    // Check if we have enough data for ethernet header
-    if (data + sizeof(*eth) > data_end)
-        return XDP_PASS;
+    // Check (untagged) IP EtherType.
+    if (bpf_ntohs(eth->h_proto) != ETH_P_IP) { return XDP_PASS; }
 
-    // Check if source MAC matches our target
-    if (__builtin_memcmp(eth->h_source, target_mac, 6) == 0) {
+    // Check we can get a valid IP header.
+    struct iphdr *ip = (struct iphdr *)(eth + 1);
+    if ((void *)(ip + 1) > data_end) { return XDP_PASS; }
+
+    // Verify it's actually an IPv4 packet.
+    if (ip->version != 4) { return XDP_PASS; }
+
+    // Check if source MAC matches a map entry.
+    struct Device *d = bpf_map_lookup_elem(&mac_map, &eth->h_source);
+    if (d) {
         bpf_printk("gns: found packet!");
-
-        // Test map access by looking up the first sample MAC address
-        unsigned char test_mac[6] = {0x00, 0x00, 0x00, 0x00, 0x00, 0x01};
-        struct Device *d = bpf_map_lookup_elem(&mac_map, &test_mac);
-        if (d) {
-            bpf_printk(
-                "gns: Found MAC: %02x:%02x:%02x:%02x:%02x:%02x, IP: %pI4, VLAN: %u",
-                d->mac[0],
-                d->mac[1],
-                d->mac[2],
-                d->mac[3],
-                d->mac[4],
-                d->mac[5],
-                &d->ip.s_addr,
-                d->vlan
-            );
-        } else {
-            bpf_printk("gns: MAC not found");
-        }
-
-        // Note: FCS recalculation is typically handled by the network hardware
-        // when the packet is transmitted. XDP programs don't usually need to
-        // manually recalculate FCS as it's handled at the driver/hardware level.
     }
 
     return XDP_PASS;

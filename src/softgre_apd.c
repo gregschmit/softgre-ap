@@ -73,13 +73,13 @@ struct xdp_state *close_xdp_state(struct xdp_state *state) {
     return NULL;
 }
 
-void try_clear_bpf_map(struct bpf_map *map) {
+void try_clear_bpf_map(struct bpf_map *map, unsigned int key_size) {
     if (!map) { return; }
 
     void *cur_key = NULL;
     void *next_key = NULL;
-    while (bpf_map__get_next_key(map, cur_key, next_key, MAC_SIZE) == 0) {
-        bpf_map__delete_elem(map, next_key, MAC_SIZE, BPF_ANY);
+    while (bpf_map__get_next_key(map, cur_key, next_key, key_size) == 0) {
+        bpf_map__delete_elem(map, next_key, key_size, BPF_ANY);
         cur_key = next_key;
     }
 }
@@ -131,13 +131,21 @@ struct xdp_state *load_xdp_program(char *xdp_path, int num_ifs, char **ifs) {
         return close_xdp_state(state);
     }
 
-    // Find the BPF map.
-    struct bpf_map *map = bpf_object__find_map_by_name(state->obj, "mac_map");
-    if (!map) {
-        log_error("Failed to find BPF map.");
+    // Find the MAC map and clear it.
+    struct bpf_map *mac_map = bpf_object__find_map_by_name(state->obj, "mac_map");
+    if (!mac_map) {
+        log_error("Failed to find MAC BPF map.");
         return close_xdp_state(state);
     }
-    try_clear_bpf_map(map);
+    try_clear_bpf_map(mac_map, ETH_ALEN);
+
+    // Find the IP map and clear it.
+    struct bpf_map *ip_map = bpf_object__find_map_by_name(state->obj, "ip_map");
+    if (!ip_map) {
+        log_error("Failed to find IP BPF map.");
+        return close_xdp_state(state);
+    }
+    try_clear_bpf_map(ip_map, sizeof(struct in_addr));
 
     // Attach the XDP program to each interface.
     int successful_attachments = 0;
@@ -230,18 +238,21 @@ struct DeviceList parse_map_file(const char *path) {
 void update_bpf_map(struct xdp_state *state, const char *map_path) {
     if (!state || !state->obj) { return; }
 
-    // Get the Map object.
-    struct bpf_map *map = bpf_object__find_map_by_name(state->obj, "mac_map");
-    if (!map) { return; }
+    // Get the map objects.
+    struct bpf_map *mac_map = bpf_object__find_map_by_name(state->obj, "mac_map");
+    if (!mac_map) { return; }
+    struct bpf_map *ip_map = bpf_object__find_map_by_name(state->obj, "ip_map");
+    if (!ip_map) { return; }
 
     // Get parsed map file.
     struct DeviceList device_list = parse_map_file(map_path);
     if (!device_list.length) { return; }
 
-    // Clear BPF map.
+    // Clear BPF maps.
     // TODO: Improve this to be more performant by iterating over the map and removing entries not
     // present in the new device list.
-    try_clear_bpf_map(map);
+    try_clear_bpf_map(mac_map, ETH_ALEN);
+    try_clear_bpf_map(ip_map, sizeof(struct in_addr));
 
     // Update the BPF map with the new devices.
     for (int i = 0; i < device_list.length; i++) {
@@ -249,6 +260,7 @@ void update_bpf_map(struct xdp_state *state, const char *map_path) {
         bpf_map__update_elem(
             map, &device.mac, sizeof(device.mac), &device, sizeof(device), BPF_ANY
         );
+        bpf_map__update_elem(map, &device.ip, sizeof(device.ip), &device, sizeof(device), BPF_ANY);
     }
 
     device_list__free(device_list);
