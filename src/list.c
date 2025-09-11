@@ -12,7 +12,7 @@
  *   - search is only used for the GRE IP config list, which is typically an especially small list
  *   - search is only used when building the initial list to avoid inserting multiple IP configs for
  *     the same GRE IP
- *   - we use a `counter` for the BPF maps to make it quick and easy to remove stale entries
+ *   - we use a `cycle` for the BPF maps to make it quick and easy to remove stale entries
  *
  *  If we modify the BPF map update behavior or violate any of the other assumptions above, then we
  *  may want to revisit this implementation and consider using some kind of hash/tree data structure
@@ -20,7 +20,9 @@
  */
 
 #include <limits.h>
+#include <stddef.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "log.h"
 
@@ -28,8 +30,8 @@
 
 #define INITIAL_LIST_SIZE 32
 
-struct List *list__new(size_t item_size, size_t key_size, list__key_eq_t key_eq) {
-    struct List *list = malloc(sizeof(struct List));
+List *list__new(size_t item_size, size_t key_size, list__key_eq_t key_eq) {
+    List *list = malloc(sizeof(List));
     if (!list) {
         log_errno("malloc");
         log_error("Failed to allocate memory for list.");
@@ -38,7 +40,7 @@ struct List *list__new(size_t item_size, size_t key_size, list__key_eq_t key_eq)
 
     list->item_size = item_size;
     list->key_size = key_size;
-    list->key_compare = key_compare;
+    list->key_eq = key_eq;
 
     list->items = malloc(INITIAL_LIST_SIZE * item_size);
     if (!list->items) {
@@ -54,13 +56,13 @@ struct List *list__new(size_t item_size, size_t key_size, list__key_eq_t key_eq)
     return list;
 }
 
-void list__free(struct List *list) {
+void list__free(List *list) {
     if (!list) { return; }
     if (list->items) { free(list->items); }
     free(list);
 }
 
-bool list__add(struct List *list, const void *item) {
+bool list__add(List *list, const void *item) {
     if (!list || !item) { return false; }
 
     // Double the list size, if necessary.
@@ -79,7 +81,7 @@ bool list__add(struct List *list, const void *item) {
         }
 
         // Double the list size.
-        struct List *new_items = realloc(list->items, new_size * list->item_size);
+        List *new_items = realloc(list->items, new_size * list->item_size);
         if (!new_items) {
             log_errno("realloc");
             log_error("Failed to allocate memory for list (%u).", new_size);
@@ -96,7 +98,7 @@ bool list__add(struct List *list, const void *item) {
     return true;
 }
 
-bool list__contains(struct List *list, const void *key) {
+bool list__contains(List *list, const void *key) {
     if (!list || !key) { return false; }
 
     for (size_t i = 0; i < list->length; i++) {
@@ -108,7 +110,7 @@ bool list__contains(struct List *list, const void *key) {
     return false;
 }
 
-void *list__find(struct List *list, const void *key) {
+void *list__find(List *list, const void *key) {
     if (!list || !key) { return NULL; }
 
     for (size_t i = 0; i < list->length; i++) {
@@ -121,7 +123,7 @@ void *list__find(struct List *list, const void *key) {
     return NULL;
 }
 
-void *list__nth(struct List *list, size_t n) {
+void *list__nth(List *list, size_t n) {
     if (!list || n >= list->length) { return NULL; }
     return list->items + (n * list->item_size);
 }

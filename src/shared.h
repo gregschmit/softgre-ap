@@ -29,7 +29,7 @@ struct Device {
     uint8_t mac[ETH_ALEN];  // Key
     struct in_addr gre_ip;
     uint16_t vlan;
-    uint8_t counter;  // For removing stale entries.
+    uint8_t cycle;  // For removing stale entries.
 };
 
 struct IPConfig {
@@ -40,7 +40,7 @@ struct IPConfig {
     // uint8_t dst_mac[ETH_ALEN];
     // uint8_t src_mac[ETH_ALEN];
     unsigned ifindex;
-    uint8_t counter;  // For removing stale entries.
+    uint8_t cycle;  // For removing stale entries.
 };
 
 #ifndef __BPF__

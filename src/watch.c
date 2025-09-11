@@ -53,7 +53,7 @@ bool watch(const char *map_path, callback_t callback, struct XDPState *state) {
     int wd_is_dir = 0;
     char buf[BUF_LEN];
     while (1) {
-        if (interrupt) {
+        if (INTERRUPT) {
             dbg("Stopping watch...");
             break;
         }

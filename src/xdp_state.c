@@ -7,6 +7,8 @@
 #include <netinet/in.h>
 #include <net/if.h>
 
+#include <bpf/libbpf.h>
+
 #include "log.h"
 
 #include "xdp_state.h"
@@ -87,23 +89,23 @@ struct XDPState *xdp_state__open(char *xdp_path, unsigned num_ifs, char **ifs) {
         return NULL;
     }
 
-    // Find the MAC map and clear it.
-    struct bpf_map *mac_map = bpf_object__find_map_by_name(state->obj, "mac_map");
-    if (!mac_map) {
-        log_error("Failed to find MAC BPF map.");
+    // Find the Device map and clear it.
+    struct bpf_map *device_map = bpf_object__find_map_by_name(state->obj, "device_map");
+    if (!device_map) {
+        log_error("Failed to find Device BPF map.");
         xdp_state__close(state);
         return NULL;
     }
-    xdp_state__clear_mac_map(state);
+    xdp_state__clear_device_map(state);
 
-    // Find the IP map and clear it.
-    struct bpf_map *ip_map = bpf_object__find_map_by_name(state->obj, "ip_map");
-    if (!ip_map) {
-        log_error("Failed to find IP BPF map.");
+    // Find the IP Config map and clear it.
+    struct bpf_map *ip_config_map = bpf_object__find_map_by_name(state->obj, "ip_config_map");
+    if (!ip_config_map) {
+        log_error("Failed to find IP Config BPF map.");
         xdp_state__close(state);
         return NULL;
     }
-    xdp_state__clear_ip_map(state);
+    xdp_state__clear_ip_config_map(state);
 
     // Attach the XDP program to each interface.
     int successful_attachments = 0;
@@ -135,28 +137,27 @@ struct XDPState *xdp_state__open(char *xdp_path, unsigned num_ifs, char **ifs) {
     return state;
 }
 
-struct bpf_map *xdp_state__get_mac_map(struct XDPState *state) {
+struct bpf_map *xdp_state__get_device_map(struct XDPState *state) {
     if (!state || !state->obj) { return NULL; }
-    return bpf_object__find_map_by_name(state->obj, "mac_map");
+    return bpf_object__find_map_by_name(state->obj, "device_map");
 }
 
-struct bpf_map *xdp_state__get_ip_map(struct XDPState *state) {
+struct bpf_map *xdp_state__get_ip_config_map(struct XDPState *state) {
     if (!state || !state->obj) { return NULL; }
-    return bpf_object__find_map_by_name(state->obj, "ip_map");
+    return bpf_object__find_map_by_name(state->obj, "ip_config_map");
 }
 
-void xdp_state__clear_mac_map(struct XDPState *state) {
-    struct bpf_map *mac_map = xdp_state__get_mac_map(state);
-    if (!mac_map) { return; }
+void xdp_state__clear_device_map(struct XDPState *state) {
+    struct bpf_map *device_map = xdp_state__get_device_map(state);
+    if (!device_map) { return; }
 
-    uint8_t key[ETH_ALEN];
-    uint8_t next_key[ETH_ALEN];
+    uint8_t key[ETH_ALEN], next_key[ETH_ALEN];
 
     // Get the first key.
-    int res = bpf_map__get_next_key(mac_map, NULL, key, ETH_ALEN);
+    int res = bpf_map__get_next_key(device_map, NULL, key, ETH_ALEN);
     if (res) {
         if (res != -ENOENT) {
-            log_error("Failed to get first key from MAC map (%d).", res);
+            log_error("Failed to get first key from Device map (%d).", res);
         }
 
         return;
@@ -164,12 +165,12 @@ void xdp_state__clear_mac_map(struct XDPState *state) {
 
     while (res == 0) {
         // Get the next key before deleting the current key.
-        res = bpf_map__get_next_key(mac_map, key, next_key, ETH_ALEN);
+        res = bpf_map__get_next_key(device_map, key, next_key, ETH_ALEN);
 
         // Delete the current key.
-        if (bpf_map__delete_elem(mac_map, key, ETH_ALEN, BPF_ANY) != 0) {
+        if (bpf_map__delete_elem(device_map, key, ETH_ALEN, BPF_ANY) != 0) {
             log_errno("bpf_map__delete_elem");
-            log_error("Failed to delete key from MAC map.");
+            log_error("Failed to delete key from Device map.");
             return;
         }
 
@@ -180,22 +181,21 @@ void xdp_state__clear_mac_map(struct XDPState *state) {
     }
 
     if (res != -ENOENT) {
-        log_error("Failed to get next key from MAC map.");
+        log_error("Failed to get next key from Device map.");
     }
 }
 
-void xdp_state__clear_ip_map(struct XDPState *state) {
-    struct bpf_map *ip_map = xdp_state__get_ip_map(state);
-    if (!ip_map) { return; }
+void xdp_state__clear_ip_config_map(struct XDPState *state) {
+    struct bpf_map *ip_config_map = xdp_state__get_ip_config_map(state);
+    if (!ip_config_map) { return; }
 
-    struct in_addr key;
-    struct in_addr next_key;
+    struct in_addr key, next_key;
 
     // Get the first key.
-    int res = bpf_map__get_next_key(ip_map, NULL, &key, sizeof(key));
+    int res = bpf_map__get_next_key(ip_config_map, NULL, &key, sizeof(key));
     if (res) {
         if (res != -ENOENT) {
-            log_error("Failed to get first key from IP map (%d).", res);
+            log_error("Failed to get first key from IP Config map (%d).", res);
         }
 
         return;
@@ -203,12 +203,12 @@ void xdp_state__clear_ip_map(struct XDPState *state) {
 
     while (res == 0) {
         // Get the next key before deleting the current key.
-        res = bpf_map__get_next_key(ip_map, &key, &next_key, sizeof(next_key));
+        res = bpf_map__get_next_key(ip_config_map, &key, &next_key, sizeof(next_key));
 
         // Delete the current key.
-        if (bpf_map__delete_elem(ip_map, &key, sizeof(key), BPF_ANY) != 0) {
+        if (bpf_map__delete_elem(ip_config_map, &key, sizeof(key), BPF_ANY) != 0) {
             log_errno("bpf_map__delete_elem");
-            log_error("Failed to delete key from IP map.");
+            log_error("Failed to delete key from IP Config map.");
             return;
         }
 
@@ -219,6 +219,142 @@ void xdp_state__clear_ip_map(struct XDPState *state) {
     }
 
     if (res != -ENOENT) {
-        log_error("Failed to get next key from IP map.");
+        log_error("Failed to get next key from IP Config map.");
     }
+}
+
+void xdp_state__remove_stale_devices(struct XDPState *state, List *devices) {
+    if (!state || !devices) { return; }
+
+    struct bpf_map *device_map = xdp_state__get_device_map(state);
+    if (!device_map) { return; }
+
+    uint8_t key[ETH_ALEN], next_key[ETH_ALEN];
+
+    // Get the first key.
+    int res = bpf_map__get_next_key(device_map, NULL, key, ETH_ALEN);
+    if (res) {
+        if (res != -ENOENT) {
+            log_error("Failed to get first key from MAC map (%d).", res);
+        }
+
+        return;
+    }
+
+    while (!res) {
+        // Get the next key before possibly deleting the current key.
+        res = bpf_map__get_next_key(device_map, key, next_key, ETH_ALEN);
+
+        // Look up the device to check its cycle.
+        struct Device device;
+        if (bpf_map__lookup_elem(device_map, key, ETH_ALEN, &device)) {
+            log_error("Failed to look up device in Device map.");
+            return;
+        } else {
+            if (device.cycle != state->cycle) {
+                // Cycle doesn't match, so remove this stale entry.
+                if (bpf_map__delete_elem(device_map, key, ETH_ALEN, BPF_ANY) != 0) {
+                    log_error("Failed to delete stale key from Device map.");
+                    return;
+                }
+            }
+        }
+
+        // Copy next key to key for the next iteration.
+        if (res == 0) {
+            memcpy(key, next_key, ETH_ALEN);
+        }
+    }
+
+    if (res != -ENOENT) {
+        log_error("Failed to get next key from Device map.");
+    }
+}
+
+void xdp_state__remove_stale_ip_configs(struct XDPState *state, List *ip_configs) {
+    if (!state || !ip_configs) { return; }
+
+    struct bpf_map *ip_config_map = xdp_state__get_ip_config_map(state);
+    if (!ip_config_map) { return; }
+
+    struct in_addr key, next_key;
+
+    // Get the first key.
+    int res = bpf_map__get_next_key(ip_config_map, NULL, &key, sizeof(key));
+    if (res) {
+        if (res != -ENOENT) {
+            log_error("Failed to get first key from IP Config map (%d).", res);
+        }
+
+        return;
+    }
+
+    while (!res) {
+        // Get the next key before possibly deleting the current key.
+        res = bpf_map__get_next_key(ip_config_map, &key, &next_key, sizeof(next_key));
+
+        // Look up the IP config to check its cycle.
+        struct IPConfig ip_config;
+        if (bpf_map__lookup_elem(ip_config_map, &key, sizeof(key), &ip_config)) {
+            log_error("Failed to look up IP config in IP Config map.");
+            return;
+        } else {
+            if (ip_config.cycle != state->cycle) {
+                // Cycle doesn't match, so remove this stale entry.
+                if (bpf_map__delete_elem(ip_config_map, &key, sizeof(key), BPF_ANY) != 0) {
+                    log_error("Failed to delete stale key from IP Config map.");
+                    return;
+                }
+            }
+        }
+
+        // Copy next key to key for the next iteration.
+        if (res == 0) {
+            key = next_key;
+        }
+    }
+
+    if (res != -ENOENT) {
+        log_error("Failed to get next key from IP Config map.");
+    }
+}
+
+unsigned xdp_state__get_num_devices(struct XDPState *state) {
+    if (!state) { return 0; }
+
+    struct bpf_map *device_map = xdp_state__get_device_map(state);
+    if (!device_map) { return 0; }
+
+    uint8_t key[ETH_ALEN], next_key[ETH_ALEN];
+    unsigned count = 0;
+    int res = bpf_map__get_next_key(device_map, NULL, key, ETH_ALEN);
+    while (res == 0) {
+        count++;
+        res = bpf_map__get_next_key(device_map, key, next_key, ETH_ALEN);
+        if (res == 0) {
+            memcpy(key, next_key, ETH_ALEN);
+        }
+    }
+
+    return count;
+}
+
+unsigned xdp_state__get_num_ip_configs(struct XDPState *state) {
+    if (!state) { return 0; }
+
+    struct bpf_map *ip_config_map = xdp_state__get_ip_config_map(state);
+    if (!ip_config_map) { return 0; }
+
+    struct in_addr key, next_key;
+    unsigned count = 0;
+    int res = bpf_map__get_next_key(ip_config_map, NULL, &key, sizeof(key));
+    while (res == 0) {
+        count++;
+        res = bpf_map__get_next_key(ip_config_map, &key, &next_key, sizeof(next_key));
+        if (res == 0) {
+            key = next_key;
+        }
+    }
+
+    return count;
 }

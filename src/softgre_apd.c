@@ -6,6 +6,7 @@
  */
 
 #include <errno.h>
+#include <getopt.h>
 #include <limits.h>
 #include <signal.h>
 #include <stdarg.h>
@@ -20,7 +21,10 @@
 #include <arpa/inet.h>
 #include <net/if.h>
 
+#include <sys/socket.h>
+#include <ifaddrs.h>
 #include <linux/bpf.h>
+#include <linux/if_packet.h>
 
 #include "debug.h"
 #include "list.h"
@@ -143,7 +147,7 @@ bool populate_ip_config(struct IPConfig *ip_config) {
     return true;
 }
 
-void parse_map_file(const char *path, struct List *devices, struct List *ip_configs) {
+void parse_map_file(const char *path, List *devices, List *ip_configs, uint8_t cycle) {
     if (!devices || !ip_configs) { return; }
 
     FILE *fp = fopen(path, "r");
@@ -166,7 +170,7 @@ void parse_map_file(const char *path, struct List *devices, struct List *ip_conf
         if (linebuf[0] == '#') { continue; }
 
         // Parse the line, logging but otherwise disregarding any errors.
-        struct Device device = {0};
+        struct Device device = {.cycle = cycle};
         char gre_ip[16] = "";
         int res = sscanf(
             linebuf,
@@ -203,7 +207,7 @@ void parse_map_file(const char *path, struct List *devices, struct List *ip_conf
             // We haven't seen this GRE IP before, so populate a new IP config and add it to the
             // list. If we fail to populate it fully, then skip this device. But add the IP config
             // regardless so we don't try again for subsequent devices with the same GRE IP.
-            struct IPConfig ip_config = {.gre_ip = device.gre_ip};
+            struct IPConfig ip_config = {.gre_ip = device.gre_ip, .cycle = cycle};
             if (!populate_ip_config(&ip_config)) {
                 log_error("Failed to populate IP config for IP: %s", gre_ip);
                 continue;
@@ -228,8 +232,6 @@ void parse_map_file(const char *path, struct List *devices, struct List *ip_conf
     }
 
     fclose(fp);
-
-    return list;
 }
 
 void update_bpf_map(struct XDPState *state, const char *map_path) {
@@ -244,31 +246,38 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
     }
 
     // Get the map objects.
-    struct bpf_map *mac_map = xdp_state__get_mac_map(state);
-    if (!mac_map) {
-        log_error("Failed to get MAC map.");
+    struct bpf_map *device_map = xdp_state__get_device_map(state);
+    if (!device_map) {
+        log_error("Failed to get Device map.");
         return;
     }
-    struct bpf_map *ip_map = xdp_state__get_ip_map(state);
-    if (!ip_map) {
-        log_error("Failed to get IP map.");
+    struct bpf_map *ip_config_map = xdp_state__get_ip_config_map(state);
+    if (!ip_config_map) {
+        log_error("Failed to get IP Config map.");
         return;
     }
 
     // Create device and IP config lists.
-    struct List *devices = list__new(
+    List *devices = list__new(
         sizeof(struct Device), sizeof(uint8_t) * ETH_ALEN, device__key_eq
     );
     if (!devices) { return; }
-    struct List *ip_configs = list__new(
+    List *ip_configs = list__new(
         sizeof(struct IPConfig), sizeof(struct in_addr), ip_config__key_eq
     );
-    if (!ip_configs) { return; }
+    if (!ip_configs) {
+        list__free(devices);
+        return;
+    }
+
+    // Bump the state cycle.
+    state->cycle++;
 
     // Parse map file to populate the lists.
-    parse_map_file(map_path);
+    parse_map_file(map_path, devices, ip_configs, state->cycle);
     if (!devices->length) {
         list__free(devices);
+        list__free(ip_configs);
         return;
     }
     if (!ip_configs->length) {
@@ -277,33 +286,49 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
         return;
     }
 
-    // Clear BPF maps.
-    // TODO: Improve this to use incremental updates; currently we just clear the map which isn't
-    // efficient and causes a brief outage during updates.
-    xdp_state__clear_mac_map(state);
-    xdp_state__clear_ip_map(state);
+    // Update the IP config map.
+    for (size_t i = 0; i < ip_configs->length; i++) {
+        struct IPConfig ip_config = ip_configs->items[i];
 
-    // Update the BPF map with the new devices.
-    for (size_t i = 0; i < devices->length; i++) {
-        struct Device device = devices->items[i];
-        struct IPConfig *ip_config = list__find(ip_configs, &device.gre_ip);
-        int res;
-
-        res = bpf_map__update_elem(
-            mac_map, &device.mac, sizeof(device.mac), &device, sizeof(device), BPF_ANY
-        );
-        if (res) {
-            log_error("Failed to update MAC map (%d).", res);
-        }
-
-        bool t = 1;
-        res = bpf_map__update_elem(
-            ip_map, &device.dst_ip, sizeof(device.dst_ip), &t, sizeof(t), BPF_ANY
-        );
-        if (res) {
-            log_error("Failed to update IP map (%d).", res);
+        if (bpf_map__update_elem(
+            ip_config_map,
+            &ip_config.gre_ip,
+            sizeof(ip_config.gre_ip),
+            &ip_config,
+            sizeof(ip_config),
+            BPF_ANY
+        )) {
+            log_error("Failed to update IP map for GRE IP: %s", inet_ntoa(ip_config.gre_ip));
+            continue;
         }
     }
+
+    // Update the device map.
+    for (size_t i = 0; i < devices->length; i++) {
+        struct Device device = devices->items[i];
+        if (bpf_map__update_elem(
+            device_map,
+            &device.mac,
+            sizeof(device.mac),
+            &device,
+            sizeof(device),
+            BPF_ANY
+        )) {
+            log_error("Failed to update Device map for MAC: %02x:%02x:%02x:%02x:%02x:%02x",
+                device.mac[0],
+                device.mac[1],
+                device.mac[2],
+                device.mac[3],
+                device.mac[4],
+                device.mac[5]
+            );
+            continue;
+        }
+    }
+
+    // Remove stale entries.
+    xdp_state__remove_stale_devices(state, devices);
+    xdp_state__remove_stale_ip_configs(state, ip_configs);
 
     list__free(devices);
     list__free(ip_configs);
@@ -399,7 +424,7 @@ int main(int argc, char *argv[]) {
         "  -c         Clear existing XDP programs on interfaces.\n"
         "  -d         Enable debug logging.\n"
         "  -f         Foreground mode (no daemonization).\n"
-        "  -m FILE    MAC map file (default: " DEFAULT_MAP ").\n"
+        "  -m FILE    Map file (default: " DEFAULT_MAP ").\n"
         "  -x FILE    XDP program file (default: neighbor " DEFAULT_XDP " or PATH\n"
         "             " DEFAULT_XDP ").\n"
         "  -V         Show version.\n"

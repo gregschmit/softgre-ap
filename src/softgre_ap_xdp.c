@@ -29,7 +29,7 @@ struct {
     __uint(max_entries, MAX_DEVICES);
     __uint(key_size, ETH_ALEN);
     __uint(value_size, sizeof(struct Device));
-} mac_map SEC(".maps");
+} device_map SEC(".maps");
 
 // Shared map (GRE IP -> IPConfig).
 struct {
@@ -37,7 +37,7 @@ struct {
     __uint(max_entries, MAX_DEVICES);  // Would never be larger than the amount of devices.
     __type(key, struct in_addr);
     __type(value, struct IPConfig);
-} ip_map SEC(".maps");
+} ip_config_map SEC(".maps");
 
 static inline __u8 mac_eq(const __u8 *mac1, const __u8 *mac2) {
     for (__u8 i = 0; i < ETH_ALEN; i++) {
@@ -74,7 +74,7 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
     if ((void *)(eth + 1) > data_end) { return XDP_PASS; }
 
     if (DEBUGTEST) {
-        struct Device *d = bpf_map_lookup_elem(&mac_map, &eth->h_source);
+        struct Device *d = bpf_map_lookup_elem(&device_map, &eth->h_source);
         if (d) {
             bpf_printk(
                 "softgre_apd: packet from %02x:%02x:%02x:%02x:%02x:%02x (gre_ip: %pI4 vlan: %d)",
@@ -92,14 +92,14 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
     }
 
     // Encapsulation:
-    // If the source MAC is in the MAC map, then it's coming from a client, so we should encapsulate
-    // the frame in an IP/GRE header and pass it up the stack.
-    struct Device *src_device = bpf_map_lookup_elem(&mac_map, &eth->h_source);
+    // If the source MAC is in the Device map, then it's coming from a client, so we should
+    // encapsulate the frame in an IP/GRE header and pass it up the stack.
+    struct Device *src_device = bpf_map_lookup_elem(&device_map, &eth->h_source);
     if (src_device) {
         bpf_printk("softgre_apd: encapsulate");
 
         // Get the IP config for this device.
-        struct IPConfig *ip_cfg = bpf_map_lookup_elem(&ip_map, &src_device->gre_ip);
+        struct IPConfig *ip_cfg = bpf_map_lookup_elem(&ip_config_map, &src_device->gre_ip);
         if (!ip_cfg) {
             bpf_printk("softgre_apd: no IP config for gre_ip %pI4", &src_device->gre_ip);
             return XDP_PASS;
@@ -163,8 +163,8 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
     // Decapsulation:
     // Otherwise, if the data is a SoftGRE packet, then we should check the source IP is in the IP
     // set, and if so, decapsulate it. Then we need to check the inner destination MAC, and if it's
-    // either in the MAC map or a broadcast, then we should modify the packet bounds to finalize the
-    // decapsulation and pass it up the stack. If that's not the case, then we should forward it
+    // either in the Device map or a broadcast, then we should modify the packet bounds to finalize
+    // the decapsulation and pass it up the stack. If that's not the case, then we should forward it
     // unmodified up the stack to ensure we don't interfere with another perhaps static GRE tunnel.
 
     // Check (untagged) IP EtherType.
@@ -186,7 +186,7 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
     if (gre->flags != 0 || gre->protocol != bpf_htons(ETH_P_TEB)) { return XDP_PASS; }
 
     // Check source IP is in the IP map.
-    if (!bpf_map_lookup_elem(&ip_map, &ip->saddr)) {
+    if (!bpf_map_lookup_elem(&ip_config_map, &ip->saddr)) {
         bpf_printk("softgre_apd: source IP not in IP map");
         return XDP_PASS;
     }
@@ -199,7 +199,7 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
     struct ethhdr *inner_eth = inner_frame;
     if ((void *)(inner_eth + 1) > data_end) { return XDP_PASS; }
 
-    struct Device *dst_device = bpf_map_lookup_elem(&mac_map, &inner_eth->h_dest);
+    struct Device *dst_device = bpf_map_lookup_elem(&device_map, &inner_eth->h_dest);
     __u8 bcast = mac_eq(inner_eth->h_dest, (const __u8 [])ETH_BCAST_MAC);
     if (dst_device || bcast) {
         bpf_printk("softgre_apd: decapsulate");

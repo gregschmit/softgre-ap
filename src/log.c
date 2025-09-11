@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "debug.h"
+
 #include "log.h"
 
 void log_info(const char *msg, ...) {
