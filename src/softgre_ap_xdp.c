@@ -46,6 +46,20 @@ static inline uint8_t mac_eq(const uint8_t *mac1, const uint8_t *mac2) {
     return 1;
 }
 
+static inline void calculate_ip_checksum(struct iphdr *iph)
+{
+    __u32 csum;
+
+    // Set checksum to 0.
+    iph->check = 0;
+
+    // Calculate checksum over entire IP header.
+    csum = bpf_csum_diff(0, 0, (__be32 *)iph, sizeof(*iph), 0);
+
+    // Fold and store the result.
+    iph->check = bpf_csum_fold(csum);
+}
+
 SEC("xdp")
 int xdp_softgre_ap(struct xdp_md *ctx) {
     void *data_end = (void *)(long)ctx->data_end;
@@ -126,9 +140,9 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
         outer_ip->tot_len = bpf_htons(outer_size + inner_size);
         outer_ip->ttl = 64;  // Common default TTL.
         outer_ip->protocol = IPPROTO_GRE;
-        outer_ip->check = 0;  // TODO: Calculate proper checksum.
-        outer_ip->saddr = src_device->src_ip.s_addr;
-        outer_ip->daddr = src_device->dst_ip.s_addr;
+        outer_ip->saddr = ip_cfg->src_ip.s_addr;
+        outer_ip->daddr = ip_cfg->gre_ip.s_addr;
+        calculate_ip_checksum(outer_ip);
 
         // Write GRE Header after IP header.
         gre = (struct gre_base_hdr *)(outer_ip + 1);

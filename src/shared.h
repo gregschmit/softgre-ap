@@ -10,18 +10,18 @@
 
 // Detect BPF compilation context.
 #ifdef __BPF__
-/* BPF/XDP program: use kernel headers. */
+// BPF/XDP program: use kernel headers.
 #include <linux/if_ether.h>
 #include <linux/in.h>
 
 typedef __u8 uint8_t;
 typedef __u16 uint16_t;
 #else
-/* Userspace program: use standard library headers. */
+// Userspace program: use standard library headers.
 #include <netinet/ether.h>
 #include <netinet/in.h>
 #include <stdint.h>
-#endif
+#endif  // __BPF__
 
 #define MAX_DEVICES 1024
 
@@ -43,8 +43,10 @@ struct IPConfig {
     uint8_t counter;  // For removing stale entries.
 };
 
+#ifndef __BPF__
 bool device__key_eq(const uint8_t *key1, const uint8_t *key2);
 bool ip_config__key_eq(const struct in_addr *key1, const struct in_addr *key2);
 bool ip_config__is_valid(const struct IPConfig *ip_config);
+#endif  // __BPF__
 
 #endif  // SHARED_H
