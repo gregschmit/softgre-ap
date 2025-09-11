@@ -2,6 +2,7 @@
 #include <libgen.h>
 #include <limits.h>
 #include <poll.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -17,7 +18,7 @@
 #define BUF_LEN (EVENT_SIZE + NAME_MAX + 1)
 #define TIMEOUT 1
 
-extern volatile int interrupt;
+extern volatile bool INTERRUPT;
 
 /*
  * Watch the specified file for changes and execute the callback when a change is detected.

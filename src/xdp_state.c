@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -36,7 +37,7 @@ void xdp_state__close(struct XDPState *state) {
     free(state);
 }
 
-struct XDPState *xdp_state__open(char *xdp_path, int num_ifs, char **ifs) {
+struct XDPState *xdp_state__open(char *xdp_path, unsigned num_ifs, char **ifs) {
     struct XDPState *state = calloc(1, sizeof(struct XDPState));
     if (!state) {
         log_error("Failed to allocate memory for XDP state.");
@@ -46,7 +47,7 @@ struct XDPState *xdp_state__open(char *xdp_path, int num_ifs, char **ifs) {
     state->num_ifs = num_ifs;
 
     // Allocate memory for interface indexes.
-    state->ifindexes = calloc(num_ifs, sizeof(int));
+    state->ifindexes = calloc(num_ifs, sizeof(*state->ifindexes));
     if (!state->ifindexes) {
         log_error("Failed to allocate memory for interface indexes.");
         xdp_state__close(state);
@@ -54,7 +55,7 @@ struct XDPState *xdp_state__open(char *xdp_path, int num_ifs, char **ifs) {
     }
 
     // Allocate memory for links.
-    state->links = calloc(num_ifs, sizeof(struct bpf_link *));
+    state->links = calloc(num_ifs, sizeof(*state->links));
     if (!state->links) {
         log_error("Failed to allocate memory for links.");
         xdp_state__close(state);
@@ -95,14 +96,14 @@ struct XDPState *xdp_state__open(char *xdp_path, int num_ifs, char **ifs) {
     }
     xdp_state__clear_mac_map(state);
 
-    // Find the IP set and clear it.
-    struct bpf_map *ip_set = bpf_object__find_map_by_name(state->obj, "ip_set");
-    if (!ip_set) {
+    // Find the IP map and clear it.
+    struct bpf_map *ip_map = bpf_object__find_map_by_name(state->obj, "ip_map");
+    if (!ip_map) {
         log_error("Failed to find IP BPF map.");
         xdp_state__close(state);
         return NULL;
     }
-    xdp_state__clear_ip_set(state);
+    xdp_state__clear_ip_map(state);
 
     // Attach the XDP program to each interface.
     int successful_attachments = 0;
@@ -139,17 +140,17 @@ struct bpf_map *xdp_state__get_mac_map(struct XDPState *state) {
     return bpf_object__find_map_by_name(state->obj, "mac_map");
 }
 
-struct bpf_map *xdp_state__get_ip_set(struct XDPState *state) {
+struct bpf_map *xdp_state__get_ip_map(struct XDPState *state) {
     if (!state || !state->obj) { return NULL; }
-    return bpf_object__find_map_by_name(state->obj, "ip_set");
+    return bpf_object__find_map_by_name(state->obj, "ip_map");
 }
 
 void xdp_state__clear_mac_map(struct XDPState *state) {
     struct bpf_map *mac_map = xdp_state__get_mac_map(state);
     if (!mac_map) { return; }
 
-    unsigned char key[ETH_ALEN];
-    unsigned char next_key[ETH_ALEN];
+    uint8_t key[ETH_ALEN];
+    uint8_t next_key[ETH_ALEN];
 
     // Get the first key.
     int res = bpf_map__get_next_key(mac_map, NULL, key, ETH_ALEN);
@@ -183,18 +184,18 @@ void xdp_state__clear_mac_map(struct XDPState *state) {
     }
 }
 
-void xdp_state__clear_ip_set(struct XDPState *state) {
-    struct bpf_map *ip_set = xdp_state__get_ip_set(state);
-    if (!ip_set) { return; }
+void xdp_state__clear_ip_map(struct XDPState *state) {
+    struct bpf_map *ip_map = xdp_state__get_ip_map(state);
+    if (!ip_map) { return; }
 
     struct in_addr key;
     struct in_addr next_key;
 
     // Get the first key.
-    int res = bpf_map__get_next_key(ip_set, NULL, &key, sizeof(key));
+    int res = bpf_map__get_next_key(ip_map, NULL, &key, sizeof(key));
     if (res) {
         if (res != -ENOENT) {
-            log_error("Failed to get first key from IP set (%d).", res);
+            log_error("Failed to get first key from IP map (%d).", res);
         }
 
         return;
@@ -202,12 +203,12 @@ void xdp_state__clear_ip_set(struct XDPState *state) {
 
     while (res == 0) {
         // Get the next key before deleting the current key.
-        res = bpf_map__get_next_key(ip_set, &key, &next_key, sizeof(next_key));
+        res = bpf_map__get_next_key(ip_map, &key, &next_key, sizeof(next_key));
 
         // Delete the current key.
-        if (bpf_map__delete_elem(ip_set, &key, sizeof(key), BPF_ANY) != 0) {
+        if (bpf_map__delete_elem(ip_map, &key, sizeof(key), BPF_ANY) != 0) {
             log_errno("bpf_map__delete_elem");
-            log_error("Failed to delete key from IP set.");
+            log_error("Failed to delete key from IP map.");
             return;
         }
 
@@ -218,6 +219,6 @@ void xdp_state__clear_ip_set(struct XDPState *state) {
     }
 
     if (res != -ENOENT) {
-        log_error("Failed to get next key from IP set.");
+        log_error("Failed to get next key from IP map.");
     }
 }

@@ -13,7 +13,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
-#include "device.h"
+#include "shared.h"
 
 #define ETH_BCAST_MAC {0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 #define DEBUGTEST 0
@@ -23,7 +23,7 @@ struct gre_base_hdr {
     __be16 protocol;
 };
 
-// Shared map for MAC to Device mappings.
+// Shared map (MAC -> Device).
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, MAX_DEVICES);
@@ -31,15 +31,15 @@ struct {
     __uint(value_size, sizeof(struct Device));
 } mac_map SEC(".maps");
 
-// Shared set of endpoint IPs (needed for Ethernet Broadcast Frames).
+// Shared map (GRE IP -> IPConfig).
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, MAX_DEVICES);  // Would never be larger than the amount of devices.
     __type(key, struct in_addr);
-    __type(value, __u8);
-} ip_set SEC(".maps");
+    __type(value, struct IPConfig);
+} ip_map SEC(".maps");
 
-static inline __u8 mac_eq(const __u8 *mac1, const __u8 *mac2) {
+static inline uint8_t mac_eq(const uint8_t *mac1, const uint8_t *mac2) {
     for (int i = 0; i < ETH_ALEN; i++) {
         if (mac1[i] != mac2[i]) { return 0; }
     }
@@ -59,15 +59,14 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
         struct Device *d = bpf_map_lookup_elem(&mac_map, &eth->h_source);
         if (d) {
             bpf_printk(
-                "softgre_apd: packet found from device %02x:%02x:%02x:%02x:%02x:%02x (src_ip: %pI4 dst_ip: %pI4 vlan: %d",
+                "softgre_apd: packet from %02x:%02x:%02x:%02x:%02x:%02x (gre_ip: %pI4 vlan: %d)",
                 eth->h_source[0],
                 eth->h_source[1],
                 eth->h_source[2],
                 eth->h_source[3],
                 eth->h_source[4],
                 eth->h_source[5],
-                &d->src_ip,
-                &d->dst_ip,
+                &d->gre_ip,
                 d->vlan
             );
         }
@@ -80,39 +79,67 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
     struct Device *src_device = bpf_map_lookup_elem(&mac_map, &eth->h_source);
     if (src_device) {
         bpf_printk("softgre_apd: encapsulate");
-        unsigned short inner_size = data_end - data;
 
-        // First, expand packet to cover both GRE header and IP header.
+        // Get the IP config for this device.
+        struct IPConfig *ip_cfg = bpf_map_lookup_elem(&ip_map, &src_device->gre_ip);
+        if (!ip_cfg) {
+            bpf_printk("softgre_apd: no IP config for gre_ip %pI4", &src_device->gre_ip);
+            return XDP_PASS;
+        }
+
+        // Expand packet to cover both GRE header and IP header.
         // NOTE: Assumes we only need space for minimal (ihl=5) IP header.
-        unsigned short outer_size = sizeof(struct gre_base_hdr) + sizeof(struct iphdr);
+        unsigned short inner_size = data_end - data;
+        struct ethhdr *outer_eth = NULL;
+        struct iphdr *outer_ip = NULL;
+        struct gre_base_hdr *gre = NULL;
+        unsigned short outer_size = sizeof(*gre) + sizeof(*outer_ip) + sizeof(*outer_eth);
         if (bpf_xdp_adjust_head(ctx, -outer_size)) {
             bpf_printk("softgre_apd: bpf_xdp_adjust_head failed");
             return XDP_ABORTED;
         }
 
-        // Must recalculate data pointers after bpf_xdp_adjust_head.
+        // Must recalculate data pointers after adjusting head.
         data = (void *)(long)ctx->data;
         data_end = (void *)(long)ctx->data_end;
 
-        // Write IP Header at start of new head.
+        // Write Ethernet Header. Zero out the src/dst and we will use `bpf_redirect_neigh` to let
+        // the kernel fill them in.
+        outer_eth = data;
+        if ((void *)(outer_eth + 1) > data_end) {
+            bpf_printk("softgre_apd: outer ethhdr out of bounds");
+            return XDP_ABORTED;
+        }
+        __builtin_memset(outer_eth, 0, sizeof(*outer_eth));
+        outer_eth->h_proto = bpf_htons(ETH_P_IP);
+
+        // Write IP Header.
         // NOTE: This is a minimal IPv4 header (ihl=5).
-        struct iphdr *ip = (struct iphdr *)data;
-        __builtin_memset(ip, 0, sizeof(struct iphdr));
-        ip->version = 4;
-        ip->ihl = 5;
-        ip->tot_len = bpf_htons(outer_size + inner_size);
-        ip->ttl = 64;  // Common default TTL.
-        ip->protocol = IPPROTO_GRE;
-        ip->check = 0;  // TODO: Calculate proper checksum.
-        ip->saddr = src_device->src_ip.s_addr;
-        ip->daddr = src_device->dst_ip.s_addr;
+        outer_ip = (struct iphdr *)(outer_eth + 1);
+        if ((void *)(outer_ip + 1) > data_end) {
+            bpf_printk("softgre_apd: outer iphdr out of bounds");
+            return XDP_ABORTED;
+        }
+        __builtin_memset(outer_ip, 0, sizeof(*outer_ip));
+        outer_ip->version = 4;
+        outer_ip->ihl = 5;
+        outer_ip->tot_len = bpf_htons(outer_size + inner_size);
+        outer_ip->ttl = 64;  // Common default TTL.
+        outer_ip->protocol = IPPROTO_GRE;
+        outer_ip->check = 0;  // TODO: Calculate proper checksum.
+        outer_ip->saddr = src_device->src_ip.s_addr;
+        outer_ip->daddr = src_device->dst_ip.s_addr;
 
         // Write GRE Header after IP header.
-        struct gre_base_hdr *gre = (struct gre_base_hdr *)(ip + 1);
+        gre = (struct gre_base_hdr *)(outer_ip + 1);
+        if ((void *)(gre + 1) > data_end) {
+            bpf_printk("softgre_apd: gre header out of bounds");
+            return XDP_ABORTED;
+        }
         gre->flags = 0;
         gre->protocol = bpf_htons(ETH_P_TEB);  // Transparent Ethernet Bridging
 
-        return XDP_PASS;
+        return bpf_redirect_neigh(ip_cfg->ifindex, NULL, 0, 0);
     }
 
     // Decapsulation:
@@ -140,9 +167,9 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
     if ((void *)(gre + 1) > data_end) { return XDP_PASS; }
     if (gre->flags != 0 || gre->protocol != bpf_htons(ETH_P_TEB)) { return XDP_PASS; }
 
-    // Check source IP is in the IP set.
-    if (!bpf_map_lookup_elem(&ip_set, &ip->saddr)) {
-        bpf_printk("softgre_apd: source IP not in set");
+    // Check source IP is in the IP map.
+    if (!bpf_map_lookup_elem(&ip_map, &ip->saddr)) {
+        bpf_printk("softgre_apd: source IP not in IP map");
         return XDP_PASS;
     }
 
@@ -155,7 +182,7 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
     if ((void *)(inner_eth + 1) > data_end) { return XDP_PASS; }
 
     struct Device *dst_device = bpf_map_lookup_elem(&mac_map, &inner_eth->h_dest);
-    __u8 bcast = mac_eq(inner_eth->h_dest, (const __u8 [])ETH_BCAST_MAC);
+    uint8_t bcast = mac_eq(inner_eth->h_dest, (const uint8_t [])ETH_BCAST_MAC);
     if (dst_device || bcast) {
         bpf_printk("softgre_apd: decapsulate");
 

@@ -1,11 +1,11 @@
 #include <errno.h>
 #include <stdarg.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
 
+#include "debug.h"
 #include "log.h"
-
-extern int debug;
 
 void log_info(const char *msg, ...) {
     fprintf(stdout, " INFO: ");
@@ -34,7 +34,7 @@ void log_errno(const char *label) {
 }
 
 void dbg(const char *msg, ...) {
-    if (!debug) { return; }
+    if (!DEBUG) { return; }
 
     va_list args;
     fprintf(stderr, "DEBUG: ");
@@ -45,7 +45,7 @@ void dbg(const char *msg, ...) {
 }
 
 void dbg_errno(const char *label) {
-    if (!debug) { return; }
+    if (!DEBUG) { return; }
 
     fprintf(stderr, "DEBUG: (%s) %s\n", label, strerror(errno));
 }

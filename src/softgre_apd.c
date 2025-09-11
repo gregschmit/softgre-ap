@@ -1,7 +1,7 @@
 /*
  * SoftGRE Access Point Daemon
  *
- * This daemon loads/unload the XDP program and monitors the mapping file to keep the BPF Map
+ * This daemon loads/unload the XDP program and monitors the mapping file to keep the BPF maps
  * updated.
  */
 
@@ -9,6 +9,8 @@
 #include <limits.h>
 #include <signal.h>
 #include <stdarg.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,8 +22,10 @@
 
 #include <linux/bpf.h>
 
-#include "device/list.h"
+#include "debug.h"
+#include "list.h"
 #include "log.h"
+#include "shared.h"
 #include "watch.h"
 #include "xdp_state.h"
 
@@ -31,58 +35,116 @@
 // Must fit the largest map entry; e.g. `FF:FF:FF:FF:FF:FF 255.255.255.255 4095\0`.
 #define MAX_LINE_SIZE 39
 
-int debug = 0;
-volatile int interrupt = 0;
+volatile bool INTERRUPT = false;
+
+// Static storage to hold all interface names, if needed.
+static unsigned ALL_IFS_MAX = 20;
+static unsigned ALL_IFS_MAX_STRLEN = 256;
+static char ALL_IFS[ALL_IFS_MAX][ALL_IFS_MAX_STRLEN] = {0};
 
 void interrupt_handler(int _signum) {
-    interrupt = 1;
+    INTERRUPT = true;
 }
 
-bool get_source_ip(struct in_addr dest_ip, struct in_addr* source_ip) {
-    int sockfd;
-    struct sockaddr_in dest_addr, src_addr;
-    socklen_t src_addr_len = sizeof(src_addr);
-
+bool populate_ip_config_src_ip(struct IPConfig *ip_config) {
     // Create UDP socket.
-    sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) {
         log_errno("socket");
         return false;
     }
 
-    // Set up destination address.
-    memset(&dest_addr, 0, sizeof(dest_addr));
-    dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(53); // DNS port, but any port works.
-    dest_addr.sin_addr = dest_ip;
+    // Set up dst address.
+    struct sockaddr_in dst_addr;
+    memset(&dst_addr, 0, sizeof(dst_addr));
+    dst_addr.sin_family = AF_INET;
+    dst_addr.sin_port = htons(53);  // DNS port, but any port works.
+    dst_addr.sin_addr = ip_config->gre_ip;
 
     // Connect to destination (this doesn't actually send packets for UDP).
-    if (connect(sockfd, (struct sockaddr*)&dest_addr, sizeof(dest_addr)) < 0) {
+    if (connect(sockfd, (struct sockaddr*)&dst_addr, sizeof(dst_addr)) < 0) {
         log_errno("connect");
         close(sockfd);
         return false;
     }
 
     // Get the local address the kernel assigned.
+    struct sockaddr_in src_addr;
+    socklen_t src_addr_len = sizeof(src_addr);
     if (getsockname(sockfd, (struct sockaddr*)&src_addr, &src_addr_len) < 0) {
         log_errno("getsockname");
         close(sockfd);
         return false;
     }
 
-    // Copy the source IP.
-    *source_ip = src_addr.sin_addr;
+    // Copy the src IP.
+    ip_config->src_ip = src_addr.sin_addr;
 
     close(sockfd);
 
     return true;
 }
 
-struct DeviceList *parse_map_file(const char *path) {
-    struct DeviceList *list = device_list__new();
-    if (!list) {
-        return NULL;
+bool populate_ip_config_ifindex(struct IPConfig *ip_config) {
+    if (!ip_config) { return false; }
+
+    struct ifaddrs *ifaddr;
+    if (getifaddrs(&ifaddr) == -1) {
+        log_errno("getifaddrs");
+        return false;
     }
+
+    for (struct ifaddrs *ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (ifa->ifa_addr == NULL) { continue; }
+
+        // If this is an IPv4 address and it matches, set ifindex and break.
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            struct sockaddr_in *sin = (struct sockaddr_in *)ifa->ifa_addr;
+
+            if (sin->sin_addr.s_addr == ip_config->src_ip.s_addr) {
+                ip_config->ifindex = if_nametoindex(ifa->ifa_name);
+                break;
+            }
+
+            // NOTE: If needed in future, could also get netmask here with ifa->ifa_netmask.
+        }
+    }
+
+    // NOTE: If needed in future, could also get L2 data here by:
+    //   - Checking `ifa->ifa_addr->sa_family == AF_PACKET`.
+    //   - Casting to `struct sockaddr_ll *` and copying `sll_addr` to `ip_config->src_mac`.
+    //   - Inspecting `sll_ifindex`.
+    // This would probably have to be done in a separate loop after the above loop, because
+    // `AF_PACKET` is not guaranteed to come after `AF_INET` and in my experience it typically comes
+    // before. But we would want to match the IP addr first.
+
+    freeifaddrs(ifaddr);
+    return ip_config->ifindex != 0;
+}
+
+// Ensure `src_ip` is set to 0 if any of the population steps fail.
+bool populate_ip_config(struct IPConfig *ip_config) {
+    if (!ip_config || !ip_config->gre_ip) { return false; }
+
+    // Determine src IP for this GRE IP.
+    if (!populate_ip_config_src_ip(ip_config)) {
+        log_error("Failed to determine src IP for GRE IP: %s", inet_ntoa(ip_config->gre_ip));
+        ip_config->src_ip.s_addr = 0;
+        return false;
+    }
+
+    // Determine ifindex.
+    if (!populate_ip_config_ifindex(ip_config)) {
+        log_error("Failed to determine ifindex for src IP: %s", inet_ntoa(ip_config->src_ip));
+        ip_config->src_ip.s_addr = 0;
+        return false;
+    }
+
+    return true;
+}
+
+void parse_map_file(const char *path, struct List *devices, struct List *ip_configs) {
+    if (!devices || !ip_configs) { return; }
 
     FILE *fp = fopen(path, "r");
     if (!fp) {
@@ -94,7 +156,7 @@ struct DeviceList *parse_map_file(const char *path) {
             log_errno("fopen");
             log_error("Failed to open map file.");
         }
-        return list;
+        return;
     }
 
     // Read file line by line into the device list.
@@ -105,7 +167,7 @@ struct DeviceList *parse_map_file(const char *path) {
 
         // Parse the line, logging but otherwise disregarding any errors.
         struct Device device = {0};
-        char ip[16] = "";
+        char gre_ip[16] = "";
         int res = sscanf(
             linebuf,
             "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx %15s %hu",
@@ -115,7 +177,7 @@ struct DeviceList *parse_map_file(const char *path) {
             &device.mac[3],
             &device.mac[4],
             &device.mac[5],
-            ip,
+            gre_ip,
             &device.vlan
         );
 
@@ -124,17 +186,45 @@ struct DeviceList *parse_map_file(const char *path) {
             continue;
         }
 
-        if (!inet_pton(AF_INET, ip, &device.dst_ip)) {
-            log_error("Failed to parse dst IP: `%s`", ip);
+        if (!inet_pton(AF_INET, gre_ip, &device.gre_ip)) {
+            log_error("Failed to parse GRE IP: `%s`", gre_ip);
             continue;
         }
 
-        if (!get_source_ip(device.dst_ip, &device.src_ip)) {
-            log_error("Failed to determine src IP for dst IP: `%s`", ip);
-            continue;
+        // See if we already have an IP Config.
+        struct IPConfig *ip_config = list__find(ip_configs, &device.gre_ip);
+        if (ip_config) {
+            // If the config is not valid, then we previously failed to populate it, so skip this
+            // device.
+            if (!ip_config__is_valid(ip_config)) {
+                continue;
+            }
+        } else {
+            // We haven't seen this GRE IP before, so populate a new IP config and add it to the
+            // list. If we fail to populate it fully, then skip this device. But add the IP config
+            // regardless so we don't try again for subsequent devices with the same GRE IP.
+            struct IPConfig ip_config = {.gre_ip = device.gre_ip};
+            if (!populate_ip_config(&ip_config)) {
+                log_error("Failed to populate IP config for IP: %s", gre_ip);
+                continue;
+            }
+
+            if (!list__add(ip_configs, &ip_config)) {
+                log_error("Failed to add IP config for IP: %s", gre_ip);
+                continue;
+            }
         }
 
-        device_list__add(list, device);
+        if (!list__add(devices, &device)) {
+            log_error("Failed to add device for MAC: %02x:%02x:%02x:%02x:%02x:%02x",
+                device.mac[0],
+                device.mac[1],
+                device.mac[2],
+                device.mac[3],
+                device.mac[4],
+                device.mac[5]
+            );
+        }
     }
 
     fclose(fp);
@@ -159,16 +249,31 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
         log_error("Failed to get MAC map.");
         return;
     }
-    struct bpf_map *ip_set = xdp_state__get_ip_set(state);
-    if (!ip_set) {
-        log_error("Failed to get IP set.");
+    struct bpf_map *ip_map = xdp_state__get_ip_map(state);
+    if (!ip_map) {
+        log_error("Failed to get IP map.");
         return;
     }
 
-    // Get parsed map file.
-    struct DeviceList *device_list = parse_map_file(map_path);
-    if (!device_list || device_list->length == 0) {
-        device_list__free(device_list);
+    // Create device and IP config lists.
+    struct List *devices = list__new(
+        sizeof(struct Device), sizeof(uint8_t) * ETH_ALEN, device__key_eq
+    );
+    if (!devices) { return; }
+    struct List *ip_configs = list__new(
+        sizeof(struct IPConfig), sizeof(struct in_addr), ip_config__key_eq
+    );
+    if (!ip_configs) { return; }
+
+    // Parse map file to populate the lists.
+    parse_map_file(map_path);
+    if (!devices->length) {
+        list__free(devices);
+        return;
+    }
+    if (!ip_configs->length) {
+        list__free(devices);
+        list__free(ip_configs);
         return;
     }
 
@@ -176,11 +281,12 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
     // TODO: Improve this to use incremental updates; currently we just clear the map which isn't
     // efficient and causes a brief outage during updates.
     xdp_state__clear_mac_map(state);
-    xdp_state__clear_ip_set(state);
+    xdp_state__clear_ip_map(state);
 
     // Update the BPF map with the new devices.
-    for (unsigned int i = 0; i < device_list->length; i++) {
-        struct Device device = device_list->devices[i];
+    for (size_t i = 0; i < devices->length; i++) {
+        struct Device device = devices->items[i];
+        struct IPConfig *ip_config = list__find(ip_configs, &device.gre_ip);
         int res;
 
         res = bpf_map__update_elem(
@@ -192,14 +298,51 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
 
         bool t = 1;
         res = bpf_map__update_elem(
-            ip_set, &device.dst_ip, sizeof(device.dst_ip), &t, sizeof(t), BPF_ANY
+            ip_map, &device.dst_ip, sizeof(device.dst_ip), &t, sizeof(t), BPF_ANY
         );
         if (res) {
-            log_error("Failed to update IP set (%d).", res);
+            log_error("Failed to update IP map (%d).", res);
         }
     }
 
-    device_list__free(device_list);
+    list__free(devices);
+    list__free(ip_configs);
+}
+
+unsigned populate_all_ifs() {
+    struct ifaddrs *ifaddr;
+    if (getifaddrs(&ifaddr) == -1) {
+        log_errno("getifaddrs");
+        return 0;
+    }
+    struct ifaddrs *ifa = ifaddr;
+
+    unsigned count = 0;
+    for (struct ifaddrs *ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
+        if (count >= ALL_IFS_MAX) { break; }
+        if (ifa->ifa_addr == NULL) { continue; }
+
+        // Only consider L2 interfaces.
+        if (ifa->ifa_addr->sa_family != AF_PACKET) { continue; }
+
+        // Check if we already have this interface.
+        bool found = false;
+        for (unsigned i = 0; i < count; i++) {
+            if (strncmp(ALL_IFS[i], ifa->ifa_name, ALL_IFS_MAX_STRLEN) == 0) {
+                found = true;
+                break;
+            }
+        }
+        if (found) { continue; }
+
+        // Add the interface name to the list.
+        strncpy(ALL_IFS[count], ifa->ifa_name, ALL_IFS_MAX_STRLEN - 1);
+        ALL_IFS[count][ALL_IFS_MAX_STRLEN - 1] = '\0';
+        count++;
+    }
+
+    freeifaddrs(ifaddr);
+    return count;
 }
 
 int main(int argc, char *argv[]) {
@@ -250,7 +393,7 @@ int main(int argc, char *argv[]) {
 
     int ch;
     char version[256] = "softgre_apd " VERSION;
-    char usage[2048] = "softgre_apd " VERSION "\n\n"
+    char usage[1024] = "softgre_apd " VERSION "\n\n"
         "Usage: softgre_apd [-dfVh] [interface(s)...]\n"
         "Options:\n"
         "  -c         Clear existing XDP programs on interfaces.\n"
@@ -270,7 +413,7 @@ int main(int argc, char *argv[]) {
             // TODO: Implement.
             break;
         case 'd':
-            debug = 1;
+            DEBUG = true;
             break;
         case 'f':
             foreground = 1;
@@ -347,13 +490,29 @@ int main(int argc, char *argv[]) {
     signal(SIGQUIT, interrupt_handler);
 
     // Organize interface list.
-    int num_ifs = argc - optind;
-    char **ifs = argv + optind;
+    unsigned num_ifs = 0;
+    char **ifs = NULL;
+    if (optind >= argc) {
+        log_info("No interfaces specified, will default to all interfaces.");
+        num_ifs = populate_all_ifs();
+        ifs = (char **)ALL_IFS;
+    } else {
+        num_ifs = argc - optind;
+        ifs = argv + optind;
+    }
+
+    if (num_ifs == 0) {
+        log_error("No interfaces available.");
+        return 1;
+    } else {
+        log_info("Will attempt to bind to %d interface(s):", num_ifs);
+        for (unsigned i = 0; i < num_ifs; i++) {
+            log_info("  - %s", ifs[i]);
+        }
+    }
 
     // Load the XDP program onto selected interfaces.
-    log_info("Loading XDP program (xdp: %s, map: %s)...", xdp_path, map_path);
-    dbg("XDP Program: %s", xdp_path);
-    dbg("Map File: %s", map_path);
+    log_info("Loading XDP program (xdp: %s, map: %s).", xdp_path, map_path);
     struct XDPState *state = xdp_state__open(xdp_path, num_ifs, ifs);
     if (!state) {
         log_error("Failed to load XDP program.");
@@ -366,7 +525,7 @@ int main(int argc, char *argv[]) {
     // Watch the map file for changes.
     bool watch_success = watch(map_path, &update_bpf_map, state);
 
-    log_info("Unloading XDP program...");
+    log_info("Unloading XDP program.");
     xdp_state__close(state);
 
     return watch_success ? 0 : 1;
