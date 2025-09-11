@@ -39,25 +39,29 @@ struct {
     __type(value, struct IPConfig);
 } ip_map SEC(".maps");
 
-static inline uint8_t mac_eq(const uint8_t *mac1, const uint8_t *mac2) {
-    for (int i = 0; i < ETH_ALEN; i++) {
+static inline __u8 mac_eq(const __u8 *mac1, const __u8 *mac2) {
+    for (__u8 i = 0; i < ETH_ALEN; i++) {
         if (mac1[i] != mac2[i]) { return 0; }
     }
     return 1;
 }
 
-static inline void calculate_ip_checksum(struct iphdr *iph)
-{
-    __u32 csum;
+static inline __u16 ip_checksum(struct iphdr *ip) {
+    __u32 csum = 0;
 
-    // Set checksum to 0.
-    iph->check = 0;
+    // Sum all 16-bit words in the IP header.
+    __u16 *ptr = (__u16 *)ip;
+    for (int i = 0; i < (ip->ihl * 4) / 2; i++) {
+        csum += ptr[i];
+    }
 
-    // Calculate checksum over entire IP header.
-    csum = bpf_csum_diff(0, 0, (__be32 *)iph, sizeof(*iph), 0);
+    // Fold carry bits.
+    while (csum >> 16) {
+        csum = (csum & 0xFFFF) + (csum >> 16);
+    }
 
-    // Fold and store the result.
-    iph->check = bpf_csum_fold(csum);
+    // Return one's complement.
+    return ~csum;
 }
 
 SEC("xdp")
@@ -142,7 +146,7 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
         outer_ip->protocol = IPPROTO_GRE;
         outer_ip->saddr = ip_cfg->src_ip.s_addr;
         outer_ip->daddr = ip_cfg->gre_ip.s_addr;
-        calculate_ip_checksum(outer_ip);
+        outer_ip->check = ip_checksum(outer_ip);
 
         // Write GRE Header after IP header.
         gre = (struct gre_base_hdr *)(outer_ip + 1);
@@ -196,7 +200,7 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
     if ((void *)(inner_eth + 1) > data_end) { return XDP_PASS; }
 
     struct Device *dst_device = bpf_map_lookup_elem(&mac_map, &inner_eth->h_dest);
-    uint8_t bcast = mac_eq(inner_eth->h_dest, (const uint8_t [])ETH_BCAST_MAC);
+    __u8 bcast = mac_eq(inner_eth->h_dest, (const __u8 [])ETH_BCAST_MAC);
     if (dst_device || bcast) {
         bpf_printk("softgre_apd: decapsulate");
 
