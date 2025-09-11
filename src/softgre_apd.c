@@ -42,8 +42,8 @@
 volatile bool INTERRUPT = false;
 
 // Static storage to hold all interface names, if needed.
-static unsigned ALL_IFS_MAX = 20;
-static unsigned ALL_IFS_MAX_STRLEN = 256;
+#define ALL_IFS_MAX 20
+#define ALL_IFS_MAX_STRLEN 256
 static char ALL_IFS[ALL_IFS_MAX][ALL_IFS_MAX_STRLEN] = {0};
 
 void interrupt_handler(int _signum) {
@@ -128,7 +128,7 @@ bool populate_ip_config_ifindex(struct IPConfig *ip_config) {
 
 // Ensure `src_ip` is set to 0 if any of the population steps fail.
 bool populate_ip_config(struct IPConfig *ip_config) {
-    if (!ip_config || !ip_config->gre_ip) { return false; }
+    if (!ip_config || !ip_config->gre_ip.s_addr) { return false; }
 
     // Determine src IP for this GRE IP.
     if (!populate_ip_config_src_ip(ip_config)) {
@@ -259,11 +259,11 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
 
     // Create device and IP config lists.
     List *devices = list__new(
-        sizeof(struct Device), sizeof(uint8_t) * ETH_ALEN, device__key_eq
+        sizeof(struct Device), sizeof(uint8_t) * ETH_ALEN, (list__key_eq_t)device__key_eq
     );
     if (!devices) { return; }
     List *ip_configs = list__new(
-        sizeof(struct IPConfig), sizeof(struct in_addr), ip_config__key_eq
+        sizeof(struct IPConfig), sizeof(struct in_addr), (list__key_eq_t)ip_config__key_eq
     );
     if (!ip_configs) {
         list__free(devices);
@@ -288,7 +288,7 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
 
     // Update the IP config map.
     for (size_t i = 0; i < ip_configs->length; i++) {
-        struct IPConfig ip_config = ip_configs->items[i];
+        struct IPConfig ip_config = ((struct IPConfig *)ip_configs->items)[i];
 
         if (bpf_map__update_elem(
             ip_config_map,
@@ -305,7 +305,7 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
 
     // Update the device map.
     for (size_t i = 0; i < devices->length; i++) {
-        struct Device device = devices->items[i];
+        struct Device device = ((struct Device *)devices->items)[i];
         if (bpf_map__update_elem(
             device_map,
             &device.mac,
