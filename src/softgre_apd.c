@@ -26,7 +26,6 @@
 #include <linux/bpf.h>
 #include <linux/if_packet.h>
 
-#include "debug.h"
 #include "list.h"
 #include "log.h"
 #include "shared.h"
@@ -340,7 +339,6 @@ unsigned populate_all_ifs() {
         log_errno("getifaddrs");
         return 0;
     }
-    struct ifaddrs *ifa = ifaddr;
 
     unsigned count = 0;
     for (struct ifaddrs *ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
@@ -438,7 +436,7 @@ int main(int argc, char *argv[]) {
             // TODO: Implement.
             break;
         case 'd':
-            DEBUG = true;
+            DEBUG = 1;
             break;
         case 'f':
             foreground = 1;

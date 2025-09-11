@@ -26,6 +26,8 @@ typedef __u16 uint16_t;
 
 #define MAX_DEVICES 1024
 
+extern int DEBUG;
+
 struct Device {
     uint8_t mac[ETH_ALEN];  // Key
     struct in_addr gre_ip;
