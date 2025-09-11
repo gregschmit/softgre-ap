@@ -20,6 +20,7 @@ typedef __u16 uint16_t;
 // Userspace program: use standard library headers.
 #include <netinet/ether.h>
 #include <netinet/in.h>
+#include <stdbool.h>
 #include <stdint.h>
 #endif  // __BPF__
 
@@ -32,7 +33,7 @@ struct Device {
     uint8_t cycle;  // For removing stale entries.
 };
 
-struct IPConfig {
+struct IPCfg {
     struct in_addr gre_ip;  // Key
     struct in_addr src_ip;
     // Might need these. Currently trying to use bpf_redirect_neigh to hopefully be able to just
@@ -45,8 +46,8 @@ struct IPConfig {
 
 #ifndef __BPF__
 bool device__key_eq(const uint8_t *key1, const uint8_t *key2);
-bool ip_config__key_eq(const struct in_addr *key1, const struct in_addr *key2);
-bool ip_config__is_valid(const struct IPConfig *ip_config);
+bool ip_cfg__key_eq(const struct in_addr *key1, const struct in_addr *key2);
+bool ip_cfg__is_valid(const struct IPCfg *ip_cfg);
 #endif  // __BPF__
 
 #endif  // SHARED_H

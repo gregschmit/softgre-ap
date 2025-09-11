@@ -50,7 +50,7 @@ void interrupt_handler(int _signum) {
     INTERRUPT = true;
 }
 
-bool populate_ip_config_src_ip(struct IPConfig *ip_config) {
+bool populate_ip_cfg_src_ip(struct IPCfg *ip_cfg) {
     // Create UDP socket.
     int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) {
@@ -63,7 +63,7 @@ bool populate_ip_config_src_ip(struct IPConfig *ip_config) {
     memset(&dst_addr, 0, sizeof(dst_addr));
     dst_addr.sin_family = AF_INET;
     dst_addr.sin_port = htons(53);  // DNS port, but any port works.
-    dst_addr.sin_addr = ip_config->gre_ip;
+    dst_addr.sin_addr = ip_cfg->gre_ip;
 
     // Connect to destination (this doesn't actually send packets for UDP).
     if (connect(sockfd, (struct sockaddr*)&dst_addr, sizeof(dst_addr)) < 0) {
@@ -82,15 +82,15 @@ bool populate_ip_config_src_ip(struct IPConfig *ip_config) {
     }
 
     // Copy the src IP.
-    ip_config->src_ip = src_addr.sin_addr;
+    ip_cfg->src_ip = src_addr.sin_addr;
 
     close(sockfd);
 
     return true;
 }
 
-bool populate_ip_config_ifindex(struct IPConfig *ip_config) {
-    if (!ip_config) { return false; }
+bool populate_ip_cfg_ifindex(struct IPCfg *ip_cfg) {
+    if (!ip_cfg) { return false; }
 
     struct ifaddrs *ifaddr;
     if (getifaddrs(&ifaddr) == -1) {
@@ -105,8 +105,8 @@ bool populate_ip_config_ifindex(struct IPConfig *ip_config) {
         if (ifa->ifa_addr->sa_family == AF_INET) {
             struct sockaddr_in *sin = (struct sockaddr_in *)ifa->ifa_addr;
 
-            if (sin->sin_addr.s_addr == ip_config->src_ip.s_addr) {
-                ip_config->ifindex = if_nametoindex(ifa->ifa_name);
+            if (sin->sin_addr.s_addr == ip_cfg->src_ip.s_addr) {
+                ip_cfg->ifindex = if_nametoindex(ifa->ifa_name);
                 break;
             }
 
@@ -116,39 +116,39 @@ bool populate_ip_config_ifindex(struct IPConfig *ip_config) {
 
     // NOTE: If needed in future, could also get L2 data here by:
     //   - Checking `ifa->ifa_addr->sa_family == AF_PACKET`.
-    //   - Casting to `struct sockaddr_ll *` and copying `sll_addr` to `ip_config->src_mac`.
+    //   - Casting to `struct sockaddr_ll *` and copying `sll_addr` to `ip_cfg->src_mac`.
     //   - Inspecting `sll_ifindex`.
     // This would probably have to be done in a separate loop after the above loop, because
     // `AF_PACKET` is not guaranteed to come after `AF_INET` and in my experience it typically comes
     // before. But we would want to match the IP addr first.
 
     freeifaddrs(ifaddr);
-    return ip_config->ifindex != 0;
+    return ip_cfg->ifindex != 0;
 }
 
 // Ensure `src_ip` is set to 0 if any of the population steps fail.
-bool populate_ip_config(struct IPConfig *ip_config) {
-    if (!ip_config || !ip_config->gre_ip.s_addr) { return false; }
+bool populate_ip_cfg(struct IPCfg *ip_cfg) {
+    if (!ip_cfg || !ip_cfg->gre_ip.s_addr) { return false; }
 
     // Determine src IP for this GRE IP.
-    if (!populate_ip_config_src_ip(ip_config)) {
-        log_error("Failed to determine src IP for GRE IP: %s", inet_ntoa(ip_config->gre_ip));
-        ip_config->src_ip.s_addr = 0;
+    if (!populate_ip_cfg_src_ip(ip_cfg)) {
+        log_error("Failed to determine src IP for GRE IP: %s", inet_ntoa(ip_cfg->gre_ip));
+        ip_cfg->src_ip.s_addr = 0;
         return false;
     }
 
     // Determine ifindex.
-    if (!populate_ip_config_ifindex(ip_config)) {
-        log_error("Failed to determine ifindex for src IP: %s", inet_ntoa(ip_config->src_ip));
-        ip_config->src_ip.s_addr = 0;
+    if (!populate_ip_cfg_ifindex(ip_cfg)) {
+        log_error("Failed to determine ifindex for src IP: %s", inet_ntoa(ip_cfg->src_ip));
+        ip_cfg->src_ip.s_addr = 0;
         return false;
     }
 
     return true;
 }
 
-void parse_map_file(const char *path, List *devices, List *ip_configs, uint8_t cycle) {
-    if (!devices || !ip_configs) { return; }
+void parse_map_file(const char *path, List *devices, List *ip_cfgs, uint8_t cycle) {
+    if (!devices || !ip_cfgs) { return; }
 
     FILE *fp = fopen(path, "r");
     if (!fp) {
@@ -196,24 +196,24 @@ void parse_map_file(const char *path, List *devices, List *ip_configs, uint8_t c
         }
 
         // See if we already have an IP Config.
-        struct IPConfig *ip_config = list__find(ip_configs, &device.gre_ip);
-        if (ip_config) {
+        struct IPCfg *ip_cfg = list__find(ip_cfgs, &device.gre_ip);
+        if (ip_cfg) {
             // If the config is not valid, then we previously failed to populate it, so skip this
             // device.
-            if (!ip_config__is_valid(ip_config)) {
+            if (!ip_cfg__is_valid(ip_cfg)) {
                 continue;
             }
         } else {
             // We haven't seen this GRE IP before, so populate a new IP config and add it to the
             // list. If we fail to populate it fully, then skip this device. But add the IP config
             // regardless so we don't try again for subsequent devices with the same GRE IP.
-            struct IPConfig ip_config = {.gre_ip = device.gre_ip, .cycle = cycle};
-            if (!populate_ip_config(&ip_config)) {
+            struct IPCfg ip_cfg = {.gre_ip = device.gre_ip, .cycle = cycle};
+            if (!populate_ip_cfg(&ip_cfg)) {
                 log_error("Failed to populate IP config for IP: %s", gre_ip);
                 continue;
             }
 
-            if (!list__add(ip_configs, &ip_config)) {
+            if (!list__add(ip_cfgs, &ip_cfg)) {
                 log_error("Failed to add IP config for IP: %s", gre_ip);
                 continue;
             }
@@ -251,8 +251,8 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
         log_error("Failed to get Device map.");
         return;
     }
-    struct bpf_map *ip_config_map = xdp_state__get_ip_config_map(state);
-    if (!ip_config_map) {
+    struct bpf_map *ip_cfg_map = xdp_state__get_ip_cfg_map(state);
+    if (!ip_cfg_map) {
         log_error("Failed to get IP Config map.");
         return;
     }
@@ -262,10 +262,10 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
         sizeof(struct Device), sizeof(uint8_t) * ETH_ALEN, (list__key_eq_t)device__key_eq
     );
     if (!devices) { return; }
-    List *ip_configs = list__new(
-        sizeof(struct IPConfig), sizeof(struct in_addr), (list__key_eq_t)ip_config__key_eq
+    List *ip_cfgs = list__new(
+        sizeof(struct IPCfg), sizeof(struct in_addr), (list__key_eq_t)ip_cfg__key_eq
     );
-    if (!ip_configs) {
+    if (!ip_cfgs) {
         list__free(devices);
         return;
     }
@@ -274,31 +274,31 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
     state->cycle++;
 
     // Parse map file to populate the lists.
-    parse_map_file(map_path, devices, ip_configs, state->cycle);
+    parse_map_file(map_path, devices, ip_cfgs, state->cycle);
     if (!devices->length) {
         list__free(devices);
-        list__free(ip_configs);
+        list__free(ip_cfgs);
         return;
     }
-    if (!ip_configs->length) {
+    if (!ip_cfgs->length) {
         list__free(devices);
-        list__free(ip_configs);
+        list__free(ip_cfgs);
         return;
     }
 
     // Update the IP config map.
-    for (size_t i = 0; i < ip_configs->length; i++) {
-        struct IPConfig ip_config = ((struct IPConfig *)ip_configs->items)[i];
+    for (size_t i = 0; i < ip_cfgs->length; i++) {
+        struct IPCfg ip_cfg = ((struct IPCfg *)ip_cfgs->items)[i];
 
         if (bpf_map__update_elem(
-            ip_config_map,
-            &ip_config.gre_ip,
-            sizeof(ip_config.gre_ip),
-            &ip_config,
-            sizeof(ip_config),
+            ip_cfg_map,
+            &ip_cfg.gre_ip,
+            sizeof(ip_cfg.gre_ip),
+            &ip_cfg,
+            sizeof(ip_cfg),
             BPF_ANY
         )) {
-            log_error("Failed to update IP map for GRE IP: %s", inet_ntoa(ip_config.gre_ip));
+            log_error("Failed to update IP map for GRE IP: %s", inet_ntoa(ip_cfg.gre_ip));
             continue;
         }
     }
@@ -328,10 +328,10 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
 
     // Remove stale entries.
     xdp_state__remove_stale_devices(state, devices);
-    xdp_state__remove_stale_ip_configs(state, ip_configs);
+    xdp_state__remove_stale_ip_cfgs(state, ip_cfgs);
 
     list__free(devices);
-    list__free(ip_configs);
+    list__free(ip_cfgs);
 }
 
 unsigned populate_all_ifs() {

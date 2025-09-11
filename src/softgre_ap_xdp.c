@@ -31,13 +31,13 @@ struct {
     __uint(value_size, sizeof(struct Device));
 } device_map SEC(".maps");
 
-// Shared map (GRE IP -> IPConfig).
+// Shared map (GRE IP -> IPCfg).
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, MAX_DEVICES);  // Would never be larger than the amount of devices.
     __type(key, struct in_addr);
-    __type(value, struct IPConfig);
-} ip_config_map SEC(".maps");
+    __type(value, struct IPCfg);
+} ip_cfg_map SEC(".maps");
 
 static inline __u8 mac_eq(const __u8 *mac1, const __u8 *mac2) {
     for (__u8 i = 0; i < ETH_ALEN; i++) {
@@ -99,7 +99,7 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
         bpf_printk("softgre_apd: encapsulate");
 
         // Get the IP config for this device.
-        struct IPConfig *ip_cfg = bpf_map_lookup_elem(&ip_config_map, &src_device->gre_ip);
+        struct IPCfg *ip_cfg = bpf_map_lookup_elem(&ip_cfg_map, &src_device->gre_ip);
         if (!ip_cfg) {
             bpf_printk("softgre_apd: no IP config for gre_ip %pI4", &src_device->gre_ip);
             return XDP_PASS;
@@ -186,7 +186,7 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
     if (gre->flags != 0 || gre->protocol != bpf_htons(ETH_P_TEB)) { return XDP_PASS; }
 
     // Check source IP is in the IP map.
-    if (!bpf_map_lookup_elem(&ip_config_map, &ip->saddr)) {
+    if (!bpf_map_lookup_elem(&ip_cfg_map, &ip->saddr)) {
         bpf_printk("softgre_apd: source IP not in IP map");
         return XDP_PASS;
     }
