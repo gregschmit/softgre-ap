@@ -1,5 +1,5 @@
 /*
- * Shared definitions for the XDP program and the userspace daemon.
+ * Shared definitions for the BPF program and the userspace daemon.
  *
  * WARNING: Since these definitions are shared between kernel and userspace, they must only use
  * features available in both contexts.
@@ -10,14 +10,14 @@
 
 // Detect BPF compilation context.
 #ifdef __BPF__
-// BPF/XDP program: use kernel headers.
+// BPF program: use kernel headers.
 #include <linux/if_ether.h>
 #include <linux/in.h>
 
 typedef __u8 uint8_t;
 typedef __u16 uint16_t;
 #else
-// Userspace program: use standard library headers.
+// Userspace daemon: use standard library headers.
 #include <netinet/ether.h>
 #include <netinet/in.h>
 #include <stdbool.h>

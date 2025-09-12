@@ -1,7 +1,7 @@
 /*
  * SoftGRE Access Point Daemon
  *
- * This daemon loads/unload the XDP program and monitors the mapping file to keep the BPF maps
+ * This daemon loads/unload the BPF program and monitors the mapping file to keep the BPF maps
  * updated.
  */
 
@@ -30,10 +30,10 @@
 #include "log.h"
 #include "shared.h"
 #include "watch.h"
-#include "xdp_state.h"
+#include "bpf_state.h"
 
 #define DEFAULT_MAP "/var/run/softgre_ap_map.conf"
-#define DEFAULT_XDP "softgre_ap_xdp.o"
+#define DEFAULT_BPF "softgre_ap_bpf.o"
 
 // Must fit the largest map entry; e.g. `FF:FF:FF:FF:FF:FF 255.255.255.255 4095\0`.
 #define MAX_LINE_SIZE 39
@@ -234,24 +234,24 @@ void parse_map_file(const char *path, List *devices, List *ip_cfgs, uint8_t cycl
     fclose(fp);
 }
 
-void update_bpf_map(struct XDPState *state, const char *map_path) {
+void update_bpf_map(BPFState *state, const char *map_path) {
     if (!state) {
-        log_error("XDP state is NULL.");
+        log_error("BPF state is NULL.");
         return;
     }
 
     if (!state->obj) {
-        log_error("XDP state obj doesn't exist.");
+        log_error("BPF state obj doesn't exist.");
         return;
     }
 
     // Get the map objects.
-    struct bpf_map *device_map = xdp_state__get_device_map(state);
+    struct bpf_map *device_map = bpf_state__get_device_map(state);
     if (!device_map) {
         log_error("Failed to get Device map.");
         return;
     }
-    struct bpf_map *ip_cfg_map = xdp_state__get_ip_cfg_map(state);
+    struct bpf_map *ip_cfg_map = bpf_state__get_ip_cfg_map(state);
     if (!ip_cfg_map) {
         log_error("Failed to get IP Config map.");
         return;
@@ -327,8 +327,8 @@ void update_bpf_map(struct XDPState *state, const char *map_path) {
     }
 
     // Remove stale entries.
-    xdp_state__remove_stale_devices(state, devices);
-    xdp_state__remove_stale_ip_cfgs(state, ip_cfgs);
+    bpf_state__remove_stale_devices(state, devices);
+    bpf_state__remove_stale_ip_cfgs(state, ip_cfgs);
 
     list__free(devices);
     list__free(ip_cfgs);
@@ -378,20 +378,20 @@ unsigned populate_all_ifs() {
 int main(int argc, char *argv[]) {
     int clear_existing = 0;
     int foreground = 0;
-    char xdp_path[PATH_MAX + 1] = "";
+    char bpf_path[PATH_MAX + 1] = "";
     char map_path[PATH_MAX + 1] = DEFAULT_MAP;
 
-    // If this program was invoked with a path, then assume the XDP program is in the same
+    // If this program was invoked with a path, then assume the BPF program is in the same
     // directory.
     char *last_slash = strrchr(argv[0], '/');
     if (last_slash != NULL) {
         int len = last_slash - argv[0];
-        snprintf(xdp_path, sizeof(xdp_path), "%.*s/" DEFAULT_XDP, len, argv[0]);
+        snprintf(bpf_path, sizeof(bpf_path), "%.*s/" DEFAULT_BPF, len, argv[0]);
 
-        // Check if that file DOESN'T exist, and if so, clear the `xdp_path`.
-        FILE *fp = fopen(xdp_path, "r");
+        // Check if that file DOESN'T exist, and if so, clear the `bpf_path`.
+        FILE *fp = fopen(bpf_path, "r");
         if (fp == NULL) {
-            xdp_path[0] = '\0';
+            bpf_path[0] = '\0';
         } else {
             fclose(fp);
         }
@@ -405,16 +405,16 @@ int main(int argc, char *argv[]) {
         log_error("Failed to duplicate PATH environment variable.");
         return 1;
     }
-    if (xdp_path[0] == '\0' && path_env != NULL) {
+    if (bpf_path[0] == '\0' && path_env != NULL) {
         char *path = strtok(path_env_copy, ":");
         while (path != NULL) {
-            snprintf(xdp_path, sizeof(xdp_path), "%s/" DEFAULT_XDP, path);
-            FILE *fp = fopen(xdp_path, "r");
+            snprintf(bpf_path, sizeof(bpf_path), "%s/" DEFAULT_BPF, path);
+            FILE *fp = fopen(bpf_path, "r");
             if (fp != NULL) {
                 fclose(fp);
                 break;
             }
-            xdp_path[0] = '\0';
+            bpf_path[0] = '\0';
             path = strtok(NULL, ":");
         }
     }
@@ -426,12 +426,12 @@ int main(int argc, char *argv[]) {
     char usage[1024] = "softgre_apd " VERSION "\n\n"
         "Usage: softgre_apd [-dfVh] [interface(s)...]\n"
         "Options:\n"
-        "  -c         Clear existing XDP programs on interfaces.\n"
+        "  -c         Clear existing BPF programs on interfaces.\n"
         "  -d         Enable debug logging.\n"
         "  -f         Foreground mode (no daemonization).\n"
         "  -m FILE    Map file (default: " DEFAULT_MAP ").\n"
-        "  -x FILE    XDP program file (default: neighbor " DEFAULT_XDP " or PATH\n"
-        "             " DEFAULT_XDP ").\n"
+        "  -x FILE    BPF program file (default: neighbor " DEFAULT_BPF " or PATH\n"
+        "             " DEFAULT_BPF ").\n"
         "  -V         Show version.\n"
         "  -h -?      Show usage.\n";
     while ((ch = getopt(argc, argv, "cdfm:x:Vh?")) != -1) {
@@ -464,21 +464,21 @@ int main(int argc, char *argv[]) {
                 break;
             }
             case 'x': {
-                int xdp_length = strlen(optarg);
-                if (xdp_length <= 0) {
-                    log_error("Invalid XDP program file.");
+                int bpf_length = strlen(optarg);
+                if (bpf_length <= 0) {
+                    log_error("Invalid BPF program file.");
                     return 1;
-                } else if (xdp_length > PATH_MAX) {
-                    log_error("XDP program file path is too long.");
+                } else if (bpf_length > PATH_MAX) {
+                    log_error("BPF program file path is too long.");
                     return 1;
                 } else {
-                    strcpy(xdp_path, optarg);
+                    strcpy(bpf_path, optarg);
                 }
 
-                FILE *fp = fopen(xdp_path, "r");
+                FILE *fp = fopen(bpf_path, "r");
                 if (fp == NULL) {
                     log_errno("fopen");
-                    log_error("XDP program file could not be opened.");
+                    log_error("BPF program file could not be opened.");
                     return 1;
                 } else {
                     fclose(fp);
@@ -504,17 +504,17 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Check that we have an XDP program.
-    if (xdp_path[0] == '\0') {
-        log_error("No XDP program found.");
+    // Check that we have an BPF program.
+    if (bpf_path[0] == '\0') {
+        log_error("No BPF program found.");
         return 1;
     }
 
-    // Check if XDP program can be read.
-    FILE *fp = fopen(xdp_path, "r");
+    // Check if BPF program can be read.
+    FILE *fp = fopen(bpf_path, "r");
     if (fp == NULL) {
         log_errno("fopen");
-        log_error("XDP program file could not be opened.");
+        log_error("BPF program file could not be opened.");
         return 1;
     } else {
         fclose(fp);
@@ -552,11 +552,11 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Load the XDP program onto selected interfaces.
-    log_info("Loading XDP program (xdp: %s, map: %s).", xdp_path, map_path);
-    struct XDPState *state = xdp_state__open(xdp_path, num_ifs, ifs);
+    // Load the BPF program onto selected interfaces.
+    log_info("Loading BPF program (bpf: %s, map: %s).", bpf_path, map_path);
+    BPFState *state = bpf_state__open(bpf_path, num_ifs, ifs);
     if (!state) {
-        log_error("Failed to load XDP program.");
+        log_error("Failed to load BPF program.");
         exit(1);
     }
 
@@ -566,8 +566,8 @@ int main(int argc, char *argv[]) {
     // Watch the map file for changes.
     bool watch_success = watch(map_path, &update_bpf_map, state);
 
-    log_info("Unloading XDP program.");
-    xdp_state__close(state);
+    log_info("Unloading BPF program.");
+    bpf_state__close(state);
 
     return watch_success ? 0 : 1;
 }

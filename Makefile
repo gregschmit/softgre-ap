@@ -8,8 +8,8 @@ CC = clang
 # This probably shouldn't ever change, since it uses host endianness which is typically little, and
 # that's also the endianness for most target architectures, but this could be set to `bpfel` or
 # `bpfeb` if we need to target a different endianness from the host.
-XDP_TARGET ?= bpf
-XDP_TARGET_FLAG = -target $(XDP_TARGET)
+BPF_TARGET ?= bpf
+BPF_TARGET_FLAG = -target $(BPF_TARGET)
 
 # TODO: Figure out APD_TARGET_FLAG and what other options are needed for cross-compiling.
 APD_TARGET ?=
@@ -20,15 +20,15 @@ ifeq ($(STATIC),1)
 endif
 
 .PHONY: all
-all: softgre_ap_xdp.o softgre_apd
+all: softgre_ap_bpf.o softgre_apd
 
-softgre_ap_xdp.o: src/softgre_ap_xdp.c
-	$(CC) $(CFLAGS) -O2 $(XDP_TARGET_FLAG) -c src/softgre_ap_xdp.c -o $@
+softgre_ap_bpf.o: src/softgre_ap_bpf.c
+	$(CC) $(CFLAGS) -O2 $(BPF_TARGET_FLAG) -c $^ -o $@
 
-softgre_apd: src/softgre_apd.o src/list.o src/log.o src/shared.o src/watch.o src/xdp_state.o
+softgre_apd: src/softgre_apd.o src/bpf_state.o src/list.o src/log.o src/shared.o src/watch.o
 	$(CC) $(CFLAGS) -O0 $(APD_TARGET_FLAG) $^ -o $@ $(LIBS)
 
-dev: softgre_ap_xdp.o softgre_apd
+dev: softgre_ap_bpf.o softgre_apd
 	@echo "Running dev configuration..."
 	sudo ./softgre_apd -df -m ./softgre_ap_map.conf
 
@@ -54,9 +54,9 @@ build_static: docker_build
 # TODO: Get clang-tidy working.
 # .PHONY: tidy
 # tidy:
-# 	clang-tidy -checks='misc-include-cleaner' src/softgre_ap_xdp.c -- -target bpf $(CFLAGS)
+# 	clang-tidy -checks='misc-include-cleaner' src/softgre_ap_bpf.c -- -target bpf $(CFLAGS)
 # 	clang-tidy -checks='misc-include-cleaner' src/softgre_apd.c -- $(CFLAGS)
 
 .PHONY: clean
 clean:
-	rm -f softgre_ap_xdp.o softgre_apd
+	rm -f softgre_ap_bpf.o softgre_apd **/*.o
