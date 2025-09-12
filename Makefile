@@ -12,7 +12,7 @@ XDP_TARGET ?= bpf
 XDP_TARGET_FLAG = -target $(XDP_TARGET)
 
 # TODO: Figure out APD_TARGET_FLAG and what other options are needed for cross-compiling.
-APD_TARGET ?= ""
+APD_TARGET ?=
 APD_TARGET_FLAG = $(if $(APD_TARGET),-target $(APD_TARGET),)
 
 ifeq ($(STATIC),1)
