@@ -23,7 +23,7 @@ extern volatile bool INTERRUPT;
 /*
  * Watch the specified file for changes and execute the callback when a change is detected.
  */
-bool watch(const char *map_path, callback_t callback, struct XDPState *state) {
+bool watch(const char *map_path, callback_t callback, BPFState *state) {
     int map_path_len = strlen(map_path);
     if (map_path_len == 0 || map_path_len >= PATH_MAX) {
         log_error("Invalid map path.");

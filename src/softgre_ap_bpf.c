@@ -1,5 +1,5 @@
 /*
- * SoftGRE Access Point XDP Program
+ * SoftGRE Access Point BPF Program
  *
  * This program handles encapsulation/decapsulation of Dynamic SoftGRE traffic.
  */
@@ -9,6 +9,7 @@
 #include <linux/if_vlan.h>
 #include <linux/in.h>
 #include <linux/ip.h>
+#include <linux/pkt_cls.h>
 
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
@@ -64,14 +65,14 @@ static inline __u16 ip_checksum(struct iphdr *ip) {
     return ~csum;
 }
 
-SEC("xdp")
-int xdp_softgre_ap(struct xdp_md *ctx) {
-    void *data_end = (void *)(long)ctx->data_end;
-    void *data = (void *)(long)ctx->data;
+SEC("tc")
+int bpf_softgre_ap(struct __sk_buff *skb) {
+    void *data_end = (void *)(long)skb->data_end;
+    void *data = (void *)(long)skb->data;
 
     // Check for valid Ethernet header.
     struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end) { return XDP_PASS; }
+    if ((void *)(eth + 1) > data_end) { return TC_ACT_OK; }
 
     if (DEBUGTEST) {
         struct Device *d = bpf_map_lookup_elem(&device_map, &eth->h_source);
@@ -88,7 +89,7 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
                 d->vlan
             );
         }
-        return XDP_PASS;
+        return TC_ACT_OK;
     }
 
     // Encapsulation:
@@ -102,7 +103,7 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
         struct IPCfg *ip_cfg = bpf_map_lookup_elem(&ip_cfg_map, &src_device->gre_ip);
         if (!ip_cfg) {
             bpf_printk("softgre_apd: no IP config for gre_ip %pI4", &src_device->gre_ip);
-            return XDP_PASS;
+            return TC_ACT_OK;
         }
 
         // Expand packet to cover both GRE header and IP header.
@@ -112,21 +113,21 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
         struct iphdr *outer_ip = NULL;
         struct gre_base_hdr *gre = NULL;
         unsigned short outer_size = sizeof(*gre) + sizeof(*outer_ip) + sizeof(*outer_eth);
-        if (bpf_xdp_adjust_head(ctx, -outer_size)) {
-            bpf_printk("softgre_apd: bpf_xdp_adjust_head failed");
-            return XDP_ABORTED;
-        }
+        // if (bpf_xdp_adjust_head(ctx, -outer_size)) {
+        //     bpf_printk("softgre_apd: bpf_xdp_adjust_head failed");
+        //     return TC_ACT_SHOT;
+        // }
 
         // Must recalculate data pointers after adjusting head.
-        data = (void *)(long)ctx->data;
-        data_end = (void *)(long)ctx->data_end;
+        data = (void *)(long)skb->data;
+        data_end = (void *)(long)skb->data_end;
 
         // Write Ethernet Header. Zero out the src/dst and we will use `bpf_redirect_neigh` to let
         // the kernel fill them in.
         outer_eth = data;
         if ((void *)(outer_eth + 1) > data_end) {
             bpf_printk("softgre_apd: outer ethhdr out of bounds");
-            return XDP_ABORTED;
+            return TC_ACT_SHOT;
         }
         __builtin_memset(outer_eth, 0, sizeof(*outer_eth));
         outer_eth->h_proto = bpf_htons(ETH_P_IP);
@@ -136,7 +137,7 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
         outer_ip = (struct iphdr *)(outer_eth + 1);
         if ((void *)(outer_ip + 1) > data_end) {
             bpf_printk("softgre_apd: outer iphdr out of bounds");
-            return XDP_ABORTED;
+            return TC_ACT_SHOT;
         }
         __builtin_memset(outer_ip, 0, sizeof(*outer_ip));
         outer_ip->version = 4;
@@ -152,7 +153,7 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
         gre = (struct gre_base_hdr *)(outer_ip + 1);
         if ((void *)(gre + 1) > data_end) {
             bpf_printk("softgre_apd: gre header out of bounds");
-            return XDP_ABORTED;
+            return TC_ACT_SHOT;
         }
         gre->flags = 0;
         gre->protocol = bpf_htons(ETH_P_TEB);  // Transparent Ethernet Bridging
@@ -168,36 +169,36 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
     // unmodified up the stack to ensure we don't interfere with another perhaps static GRE tunnel.
 
     // Check (untagged) IP EtherType.
-    if (bpf_ntohs(eth->h_proto) != ETH_P_IP) { return XDP_PASS; }
+    if (bpf_ntohs(eth->h_proto) != ETH_P_IP) { return TC_ACT_OK; }
 
     // Check for valid IP header.
     struct iphdr *ip = (struct iphdr *)(eth + 1);
-    if ((void *)(ip + 1) > data_end) { return XDP_PASS; }
+    if ((void *)(ip + 1) > data_end) { return TC_ACT_OK; }
 
     // Verify it's a minimal IPv4 GRE packet.
     // TODO: Need to verify that all softgre packets will be minimal?
-    if (ip->version != 4) { return XDP_PASS; }
-    if (ip->ihl != 5) { return XDP_PASS; }
-    if (ip->protocol != IPPROTO_GRE) { return XDP_PASS; }
+    if (ip->version != 4) { return TC_ACT_OK; }
+    if (ip->ihl != 5) { return TC_ACT_OK; }
+    if (ip->protocol != IPPROTO_GRE) { return TC_ACT_OK; }
 
     // Check for valid simple GRE header with no flags and protocol TEB.
     struct gre_base_hdr *gre = (void *)ip + (ip->ihl * 4);
-    if ((void *)(gre + 1) > data_end) { return XDP_PASS; }
-    if (gre->flags != 0 || gre->protocol != bpf_htons(ETH_P_TEB)) { return XDP_PASS; }
+    if ((void *)(gre + 1) > data_end) { return TC_ACT_OK; }
+    if (gre->flags != 0 || gre->protocol != bpf_htons(ETH_P_TEB)) { return TC_ACT_OK; }
 
     // Check source IP is in the IP map.
     if (!bpf_map_lookup_elem(&ip_cfg_map, &ip->saddr)) {
         bpf_printk("softgre_apd: source IP not in IP map");
-        return XDP_PASS;
+        return TC_ACT_OK;
     }
 
     // Get the IP packet payload, up to the end of the data.
     void *inner_frame = (void *)(gre + 1);
-    if (inner_frame >= data_end) { return XDP_PASS; }
+    if (inner_frame >= data_end) { return TC_ACT_OK; }
 
     // Get the inner Ethernet header.
     struct ethhdr *inner_eth = inner_frame;
-    if ((void *)(inner_eth + 1) > data_end) { return XDP_PASS; }
+    if ((void *)(inner_eth + 1) > data_end) { return TC_ACT_OK; }
 
     struct Device *dst_device = bpf_map_lookup_elem(&device_map, &inner_eth->h_dest);
     __u8 bcast = mac_eq(inner_eth->h_dest, (const __u8 [])ETH_BCAST_MAC);
@@ -206,15 +207,16 @@ int xdp_softgre_ap(struct xdp_md *ctx) {
 
         // Shrink packet to remove GRE and IP headers.
         unsigned short shrink_size = sizeof(struct gre_base_hdr) + (ip->ihl * 4);
-        if (bpf_xdp_adjust_head(ctx, shrink_size)) {
-            bpf_printk("softgre_apd: bpf_xdp_adjust_head failed");
-            return XDP_ABORTED;
-        }
+        // if (bpf_xdp_adjust_head(ctx, shrink_size)) {
+        //     bpf_printk("softgre_apd: bpf_xdp_adjust_head failed");
+        //     return TC_ACT_SHOT;
+        // }
 
-        return XDP_PASS;
+        return TC_ACT_OK;
     }
 
-    return XDP_PASS;
+    // All other cases, pass the packet up the stack unmodified.
+    return TC_ACT_OK;
 }
 
-char _license[] SEC("license") = "GPL";
+char _license[] SEC("license") = "Dual MIT/GPL";

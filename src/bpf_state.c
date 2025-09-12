@@ -11,9 +11,9 @@
 
 #include "log.h"
 
-#include "xdp_state.h"
+#include "bpf_state.h"
 
-void xdp_state__close(struct XDPState *state) {
+void bpf_state__close(BPFState *state) {
     if (!state) { return; }
 
     if (state->ifindexes) {
@@ -25,7 +25,7 @@ void xdp_state__close(struct XDPState *state) {
             if (state->links[i]) {
                 int res = bpf_link__destroy(state->links[i]);
                 if (res) {
-                    log_error("Failed to destroy XDP link (%d).", res);
+                    log_error("Failed to destroy BPF link (%d).", res);
                 }
             }
         }
@@ -39,10 +39,10 @@ void xdp_state__close(struct XDPState *state) {
     free(state);
 }
 
-struct XDPState *xdp_state__open(char *xdp_path, unsigned num_ifs, char **ifs) {
-    struct XDPState *state = calloc(1, sizeof(struct XDPState));
+BPFState *bpf_state__open(char *bpf_path, unsigned num_ifs, char **ifs) {
+    BPFState *state = calloc(1, sizeof(BPFState));
     if (!state) {
-        log_error("Failed to allocate memory for XDP state.");
+        log_error("Failed to allocate memory for BPF state.");
         return NULL;
     }
 
@@ -52,7 +52,7 @@ struct XDPState *xdp_state__open(char *xdp_path, unsigned num_ifs, char **ifs) {
     state->ifindexes = calloc(num_ifs, sizeof(*state->ifindexes));
     if (!state->ifindexes) {
         log_error("Failed to allocate memory for interface indexes.");
-        xdp_state__close(state);
+        bpf_state__close(state);
         return NULL;
     }
 
@@ -60,16 +60,16 @@ struct XDPState *xdp_state__open(char *xdp_path, unsigned num_ifs, char **ifs) {
     state->links = calloc(num_ifs, sizeof(*state->links));
     if (!state->links) {
         log_error("Failed to allocate memory for links.");
-        xdp_state__close(state);
+        bpf_state__close(state);
         return NULL;
     }
 
-    // Open and load the XDP object file.
-    state->obj = bpf_object__open(xdp_path);
+    // Open and load the BPF object file.
+    state->obj = bpf_object__open(bpf_path);
     if (!state->obj) {
         log_errno("bpf_object__open");
-        log_error("Failed to open XDP object file: %s", xdp_path);
-        xdp_state__close(state);
+        log_error("Failed to open BPF object file: %s", bpf_path);
+        bpf_state__close(state);
         return NULL;
     }
 
@@ -77,15 +77,15 @@ struct XDPState *xdp_state__open(char *xdp_path, unsigned num_ifs, char **ifs) {
     if (bpf_object__load(state->obj)) {
         log_errno("bpf_object__load");
         log_error("Failed to load BPF object.");
-        xdp_state__close(state);
+        bpf_state__close(state);
         return NULL;
     }
 
-    // Find the XDP program.
-    struct bpf_program *prog = bpf_object__find_program_by_name(state->obj, "xdp_softgre_ap");
+    // Find the BPF program.
+    struct bpf_program *prog = bpf_object__find_program_by_name(state->obj, "bpf_softgre_ap");
     if (!prog) {
-        log_error("Failed to find XDP program.");
-        xdp_state__close(state);
+        log_error("Failed to find BPF program.");
+        bpf_state__close(state);
         return NULL;
     }
 
@@ -93,21 +93,21 @@ struct XDPState *xdp_state__open(char *xdp_path, unsigned num_ifs, char **ifs) {
     struct bpf_map *device_map = bpf_object__find_map_by_name(state->obj, "device_map");
     if (!device_map) {
         log_error("Failed to find Device BPF map.");
-        xdp_state__close(state);
+        bpf_state__close(state);
         return NULL;
     }
-    xdp_state__clear_device_map(state);
+    bpf_state__clear_device_map(state);
 
     // Find the IP Config map and clear it.
     struct bpf_map *ip_cfg_map = bpf_object__find_map_by_name(state->obj, "ip_cfg_map");
     if (!ip_cfg_map) {
         log_error("Failed to find IP Config BPF map.");
-        xdp_state__close(state);
+        bpf_state__close(state);
         return NULL;
     }
-    xdp_state__clear_ip_cfg_map(state);
+    bpf_state__clear_ip_cfg_map(state);
 
-    // Attach the XDP program to each interface.
+    // Attach the BPF program to each interface.
     int successful_attachments = 0;
     for (int i = 0; i < num_ifs; i++) {
         state->ifindexes[i] = if_nametoindex(ifs[i]);
@@ -117,38 +117,38 @@ struct XDPState *xdp_state__open(char *xdp_path, unsigned num_ifs, char **ifs) {
             continue;
         }
 
-        state->links[i] = bpf_program__attach_xdp(prog, state->ifindexes[i]);
+        state->links[i] = bpf_program__attach_tcx(prog, state->ifindexes[i], NULL);
         if (state->links[i]) {
             log_info("Attached to interface %s (ifindex %d).", ifs[i], state->ifindexes[i]);
             successful_attachments++;
         } else {
-            log_errno("bpf_program__attach_xdp");
-            log_error("Failed to attach XDP program to interface %s.", ifs[i]);
+            log_errno("bpf_program__attach_tcx");
+            log_error("Failed to attach BPF program to interface %s.", ifs[i]);
             continue;
         }
     }
 
     if (successful_attachments == 0) {
-        log_error("Failed to attach XDP program to any interface.");
-        xdp_state__close(state);
+        log_error("Failed to attach BPF program to any interface.");
+        bpf_state__close(state);
         return NULL;
     }
 
     return state;
 }
 
-struct bpf_map *xdp_state__get_device_map(struct XDPState *state) {
+struct bpf_map *bpf_state__get_device_map(BPFState *state) {
     if (!state || !state->obj) { return NULL; }
     return bpf_object__find_map_by_name(state->obj, "device_map");
 }
 
-struct bpf_map *xdp_state__get_ip_cfg_map(struct XDPState *state) {
+struct bpf_map *bpf_state__get_ip_cfg_map(BPFState *state) {
     if (!state || !state->obj) { return NULL; }
     return bpf_object__find_map_by_name(state->obj, "ip_cfg_map");
 }
 
-void xdp_state__clear_device_map(struct XDPState *state) {
-    struct bpf_map *device_map = xdp_state__get_device_map(state);
+void bpf_state__clear_device_map(BPFState *state) {
+    struct bpf_map *device_map = bpf_state__get_device_map(state);
     if (!device_map) { return; }
 
     uint8_t key[ETH_ALEN], next_key[ETH_ALEN];
@@ -185,8 +185,8 @@ void xdp_state__clear_device_map(struct XDPState *state) {
     }
 }
 
-void xdp_state__clear_ip_cfg_map(struct XDPState *state) {
-    struct bpf_map *ip_cfg_map = xdp_state__get_ip_cfg_map(state);
+void bpf_state__clear_ip_cfg_map(BPFState *state) {
+    struct bpf_map *ip_cfg_map = bpf_state__get_ip_cfg_map(state);
     if (!ip_cfg_map) { return; }
 
     struct in_addr key, next_key;
@@ -223,10 +223,10 @@ void xdp_state__clear_ip_cfg_map(struct XDPState *state) {
     }
 }
 
-void xdp_state__remove_stale_devices(struct XDPState *state, List *devices) {
+void bpf_state__remove_stale_devices(BPFState *state, List *devices) {
     if (!state || !devices) { return; }
 
-    struct bpf_map *device_map = xdp_state__get_device_map(state);
+    struct bpf_map *device_map = bpf_state__get_device_map(state);
     if (!device_map) { return; }
 
     uint8_t key[ETH_ALEN], next_key[ETH_ALEN];
@@ -271,10 +271,10 @@ void xdp_state__remove_stale_devices(struct XDPState *state, List *devices) {
     }
 }
 
-void xdp_state__remove_stale_ip_cfgs(struct XDPState *state, List *ip_cfgs) {
+void bpf_state__remove_stale_ip_cfgs(BPFState *state, List *ip_cfgs) {
     if (!state || !ip_cfgs) { return; }
 
-    struct bpf_map *ip_cfg_map = xdp_state__get_ip_cfg_map(state);
+    struct bpf_map *ip_cfg_map = bpf_state__get_ip_cfg_map(state);
     if (!ip_cfg_map) { return; }
 
     struct in_addr key, next_key;
@@ -319,10 +319,10 @@ void xdp_state__remove_stale_ip_cfgs(struct XDPState *state, List *ip_cfgs) {
     }
 }
 
-unsigned xdp_state__get_num_devices(struct XDPState *state) {
+unsigned bpf_state__get_num_devices(BPFState *state) {
     if (!state) { return 0; }
 
-    struct bpf_map *device_map = xdp_state__get_device_map(state);
+    struct bpf_map *device_map = bpf_state__get_device_map(state);
     if (!device_map) { return 0; }
 
     uint8_t key[ETH_ALEN], next_key[ETH_ALEN];
@@ -339,10 +339,10 @@ unsigned xdp_state__get_num_devices(struct XDPState *state) {
     return count;
 }
 
-unsigned xdp_state__get_num_ip_cfgs(struct XDPState *state) {
+unsigned bpf_state__get_num_ip_cfgs(BPFState *state) {
     if (!state) { return 0; }
 
-    struct bpf_map *ip_cfg_map = xdp_state__get_ip_cfg_map(state);
+    struct bpf_map *ip_cfg_map = bpf_state__get_ip_cfg_map(state);
     if (!ip_cfg_map) { return 0; }
 
     struct in_addr key, next_key;
