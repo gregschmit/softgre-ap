@@ -41,9 +41,10 @@
 volatile bool INTERRUPT = false;
 
 // Static storage to hold all interface names, if needed.
-#define ALL_IFS_MAX 20
+#define ALL_IFS_MAX 50
 #define ALL_IFS_MAX_STRLEN 256
 static char ALL_IFS[ALL_IFS_MAX][ALL_IFS_MAX_STRLEN] = {0};
+static char *ALL_IFS_PTRS[ALL_IFS_MAX] = {0};
 
 void interrupt_handler(int _signum) {
     INTERRUPT = true;
@@ -351,7 +352,7 @@ unsigned populate_all_ifs() {
         // Check if we already have this interface.
         bool found = false;
         for (unsigned i = 0; i < count; i++) {
-            if (strncmp(ALL_IFS[i], ifa->ifa_name, ALL_IFS_MAX_STRLEN) == 0) {
+            if (strcmp(ALL_IFS[i], ifa->ifa_name) == 0) {
                 found = true;
                 break;
             }
@@ -524,7 +525,12 @@ int main(int argc, char *argv[]) {
     if (optind >= argc) {
         log_info("No interfaces specified, will default to all interfaces.");
         num_ifs = populate_all_ifs();
-        ifs = (char **)ALL_IFS;
+
+        // Create array of pointers to each interface string.
+        for (unsigned i = 0; i < num_ifs && i < ALL_IFS_MAX; i++) {
+            ALL_IFS_PTRS[i] = ALL_IFS[i];
+        }
+        ifs = ALL_IFS_PTRS;
     } else {
         num_ifs = argc - optind;
         ifs = argv + optind;
