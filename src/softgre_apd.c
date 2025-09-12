@@ -349,6 +349,12 @@ unsigned populate_all_ifs() {
         // Only consider L2 interfaces.
         if (ifa->ifa_addr->sa_family != AF_PACKET) { continue; }
 
+        // Cast to sockaddr_ll to access hardware type.
+        struct sockaddr_ll *sll = (struct sockaddr_ll *)ifa->ifa_addr;
+
+        // Skip loopback and non-ethernet interfaces.
+        if (sll->sll_hatype != ARPHRD_ETHER) { continue; }
+
         // Check if we already have this interface.
         bool found = false;
         for (unsigned i = 0; i < count; i++) {
@@ -523,7 +529,7 @@ int main(int argc, char *argv[]) {
     unsigned num_ifs = 0;
     char **ifs = NULL;
     if (optind >= argc) {
-        log_info("No interfaces specified, will default to all interfaces.");
+        log_info("No interfaces specified; defaulting to all Ethernet interfaces.");
         num_ifs = populate_all_ifs();
 
         // Create array of pointers to each interface string.
