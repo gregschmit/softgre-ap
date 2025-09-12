@@ -11,18 +11,18 @@ CFLAGS_USER = $(CFLAGS_COMMON) -target aarch64-linux-musl
 CFLAGS_USER += -I/usr/include/aarch64-linux-musl
 
 SOFTGRE_APD_OBJFILES = \
-	src/softgre_apd.o src/list.o src/log.o src/shared.o src/watch.o src/xdp_state.o
+	src/softgre_apd.o src/list.o src/log.o src/shared.o src/watch.o src/bpf_state.o
 
 .PHONY: all
-all: softgre_ap_xdp.o softgre_apd
+all: softgre_ap_bpf.o softgre_apd
 
-softgre_ap_xdp.o: src/softgre_ap_xdp.c
+softgre_ap_bpf.o: src/softgre_ap_bpf.c
 	$(CC) $(CFLAGS_BPF) -O2 -target bpf -c $< -o $@
 
 softgre_apd: $(SOFTGRE_APD_OBJFILES)
 	$(CC) $(CFLAGS_USER) -O0 $^ -o $@ -lbpf
 
-dev: softgre_ap_xdp.o softgre_apd
+dev: softgre_ap_bpf.o softgre_apd
 	@echo "Running dev configuration..."
 	sudo ./softgre_apd -df -m ./softgre_ap_map.conf
 
@@ -31,7 +31,7 @@ $(SOFTGRE_APD_OBJFILES): %.o : %.c
 
 .PHONY: tidy
 tidy:
-	clang-tidy -checks='misc-include-cleaner' src/softgre_ap_xdp.c -- -target bpf $(CFLAGS_BPF)
+	clang-tidy -checks='misc-include-cleaner' src/softgre_ap_bpf.c -- -target bpf $(CFLAGS_BPF)
 	clang-tidy -checks='misc-include-cleaner' src/softgre_apd.c -- $(CFLAGS_USER)
 
 .PHONY: docker_build
@@ -52,10 +52,10 @@ build_static: docker_build
 # TODO: Get clang-tidy working.
 # .PHONY: tidy
 # tidy:
-# 	clang-tidy -checks='misc-include-cleaner' src/softgre_ap_xdp.c -- -target bpf $(CFLAGS)
+# 	clang-tidy -checks='misc-include-cleaner' src/softgre_ap_bpf.c -- -target bpf $(CFLAGS)
 # 	clang-tidy -checks='misc-include-cleaner' src/softgre_apd.c -- $(CFLAGS)
 
 .PHONY: clean
 clean:
 	rm -f $(SOFTGRE_APD_OBJFILES)
-	rm -f softgre_ap_xdp.o softgre_apd
+	rm -f softgre_ap_bpf.o softgre_apd
