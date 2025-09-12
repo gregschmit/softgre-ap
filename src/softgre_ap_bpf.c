@@ -109,36 +109,65 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         // Expand packet to cover both GRE header and IP header.
         // NOTE: Assumes we only need space for minimal (ihl=5) IP header.
         unsigned short inner_size = data_end - data;
+        struct ethhdr *inner_eth = NULL;
         struct ethhdr *outer_eth = NULL;
         struct iphdr *outer_ip = NULL;
         struct gre_base_hdr *gre = NULL;
         unsigned short outer_size = sizeof(*gre) + sizeof(*outer_ip) + sizeof(*outer_eth);
-        // if (bpf_xdp_adjust_head(ctx, -outer_size)) {
-        //     bpf_printk("softgre_apd: bpf_xdp_adjust_head failed");
-        //     return TC_ACT_SHOT;
-        // }
+        if (bpf_skb_adjust_room(skb, outer_size, BPF_ADJ_ROOM_MAC, 0)) {
+            bpf_printk("softgre_apd: bpf_skb_adjust_room failed");
+            return TC_ACT_SHOT;
+        }
 
         // Must recalculate data pointers after adjusting head.
         data = (void *)(long)skb->data;
         data_end = (void *)(long)skb->data_end;
 
-        // Write Ethernet Header. Zero out the src/dst and we will use `bpf_redirect_neigh` to let
-        // the kernel fill them in.
+        // Get location of outer Ethernet header.
         outer_eth = data;
         if ((void *)(outer_eth + 1) > data_end) {
-            bpf_printk("softgre_apd: outer ethhdr out of bounds");
+            bpf_printk("softgre_apd: outer ethhdr out of bounds after adjust");
             return TC_ACT_SHOT;
         }
+
+        // Get location of outer IP header.
+        outer_ip = (struct iphdr *)(outer_eth + 1);
+        if ((void *)(outer_ip + 1) > data_end) {
+            bpf_printk("softgre_apd: outer iphdr out of bounds after adjust");
+            return TC_ACT_SHOT;
+        }
+
+        // Get location of outer GRE header.
+        gre = (struct gre_base_hdr *)(outer_ip + 1);
+        if ((void *)(gre + 1) > data_end) {
+            bpf_printk("softgre_apd: gre header out of bounds after adjust");
+            return TC_ACT_SHOT;
+        }
+
+        // Get location of inner Ethernet header.
+        inner_eth = (struct ethhdr *)(outer_eth + 1 + sizeof(*outer_ip) + sizeof(*gre));
+        if ((void *)(inner_eth + 1) > data_end) {
+            bpf_printk("softgre_apd: inner ethhdr out of bounds after adjust");
+            return TC_ACT_SHOT;
+        }
+
+        // I don't actually think this is true, and Claude agrees with me. My confusion is that the
+        // docs say that using `bpf_skb_adjust_room` with the `BPF_ADJ_ROOM_MAC` flag will `Adjust
+        // room at the mac layer (room space is added or removed between the layer 2 and layer 3
+        // headers)` and that wording implies that the existing layer 2 header might stay at the
+        // same location. But Claude says that the existing layer 2 header is moved forward in the
+        // packet to make room for the new headers, which makes more sense. Will test.
+        // // Outer Ethernet header contains inner Ethernet header data; copy to inner Ethernet
+        // // header location.
+        // __builtin_memmove(inner_eth, outer_eth, sizeof(*outer_eth));
+
+        // Write outer Ethernet header. Zero out the src/dst and we will use `bpf_redirect_neigh` to
+        // let the kernel fill them in.
         __builtin_memset(outer_eth, 0, sizeof(*outer_eth));
         outer_eth->h_proto = bpf_htons(ETH_P_IP);
 
-        // Write IP Header.
+        // Write outer IP header.
         // NOTE: This is a minimal IPv4 header (ihl=5).
-        outer_ip = (struct iphdr *)(outer_eth + 1);
-        if ((void *)(outer_ip + 1) > data_end) {
-            bpf_printk("softgre_apd: outer iphdr out of bounds");
-            return TC_ACT_SHOT;
-        }
         __builtin_memset(outer_ip, 0, sizeof(*outer_ip));
         outer_ip->version = 4;
         outer_ip->ihl = 5;
@@ -149,12 +178,7 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         outer_ip->daddr = ip_cfg->gre_ip.s_addr;
         outer_ip->check = ip_checksum(outer_ip);
 
-        // Write GRE Header after IP header.
-        gre = (struct gre_base_hdr *)(outer_ip + 1);
-        if ((void *)(gre + 1) > data_end) {
-            bpf_printk("softgre_apd: gre header out of bounds");
-            return TC_ACT_SHOT;
-        }
+        // Write outer GRE header.
         gre->flags = 0;
         gre->protocol = bpf_htons(ETH_P_TEB);  // Transparent Ethernet Bridging
 
@@ -162,11 +186,12 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
     }
 
     // Decapsulation:
-    // Otherwise, if the data is a SoftGRE packet, then we should check the source IP is in the IP
-    // set, and if so, decapsulate it. Then we need to check the inner destination MAC, and if it's
-    // either in the Device map or a broadcast, then we should modify the packet bounds to finalize
-    // the decapsulation and pass it up the stack. If that's not the case, then we should forward it
-    // unmodified up the stack to ensure we don't interfere with another perhaps static GRE tunnel.
+    // Otherwise, if the data is a GRE packet, then we should check the source IP is in the IP
+    // config map, and if so, decapsulate it. Then we need to check the inner destination MAC, and
+    // if it's either in the Device map or a broadcast, then we should modify the packet bounds to
+    // finalize the decapsulation and pass it up the stack. If that's not the case, then we should
+    // forward it unmodified up the stack to ensure we don't interfere with another perhaps static
+    // GRE tunnel.
 
     // Check (untagged) IP EtherType.
     if (bpf_ntohs(eth->h_proto) != ETH_P_IP) { return TC_ACT_OK; }
@@ -186,9 +211,9 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
     if ((void *)(gre + 1) > data_end) { return TC_ACT_OK; }
     if (gre->flags != 0 || gre->protocol != bpf_htons(ETH_P_TEB)) { return TC_ACT_OK; }
 
-    // Check source IP is in the IP map.
+    // Check source IP is in the IP config map.
     if (!bpf_map_lookup_elem(&ip_cfg_map, &ip->saddr)) {
-        bpf_printk("softgre_apd: source IP not in IP map");
+        bpf_printk("softgre_apd: source IP not in IP config map");
         return TC_ACT_OK;
     }
 
@@ -207,10 +232,10 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
 
         // Shrink packet to remove GRE and IP headers.
         unsigned short shrink_size = sizeof(struct gre_base_hdr) + (ip->ihl * 4);
-        // if (bpf_xdp_adjust_head(ctx, shrink_size)) {
-        //     bpf_printk("softgre_apd: bpf_xdp_adjust_head failed");
-        //     return TC_ACT_SHOT;
-        // }
+        if (bpf_skb_adjust_room(skb, -shrink_size, BPF_ADJ_ROOM_MAC, 0)) {
+            bpf_printk("softgre_apd: bpf_skb_adjust_room failed");
+            return TC_ACT_SHOT;
+        }
 
         return TC_ACT_OK;
     }
