@@ -65,7 +65,7 @@ static inline __u16 ip_checksum(struct iphdr *ip) {
     return ~csum;
 }
 
-SEC("tc")
+SEC("tc/ingress")
 int bpf_softgre_ap(struct __sk_buff *skb) {
     void *data_end = (void *)(long)skb->data_end;
     void *data = (void *)(long)skb->data;
