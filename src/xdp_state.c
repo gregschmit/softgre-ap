@@ -119,7 +119,7 @@ struct XDPState *xdp_state__open(char *xdp_path, unsigned num_ifs, char **ifs) {
 
         state->links[i] = bpf_program__attach_xdp(prog, state->ifindexes[i]);
         if (state->links[i]) {
-            log_info("Attached to interface %s (ifindex %d)", ifs[i], state->ifindexes[i]);
+            log_info("Attached to interface %s (ifindex %d).", ifs[i], state->ifindexes[i]);
             successful_attachments++;
         } else {
             log_errno("bpf_program__attach_xdp");

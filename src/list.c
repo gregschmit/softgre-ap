@@ -124,6 +124,5 @@ void *list__find(List *list, const void *key) {
 }
 
 void *list__nth(List *list, size_t n) {
-    if (!list || n >= list->length) { return NULL; }
     return list->items + (n * list->item_size);
 }

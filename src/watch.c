@@ -47,14 +47,14 @@ bool watch(const char *map_path, callback_t callback, struct XDPState *state) {
     char fullpath[PATH_MAX + 1];
     snprintf(fullpath, sizeof(fullpath), "%s/%s", dn, fn);
 
-    log_info("Watching %s...", fullpath);
+    log_info("Watching %s.", fullpath);
 
     int wd = -1;
     int wd_is_dir = 0;
     char buf[BUF_LEN];
     while (1) {
         if (INTERRUPT) {
-            dbg("Stopping watch...");
+            dbg("Stopping watch.");
             break;
         }
 
@@ -120,13 +120,13 @@ bool watch(const char *map_path, callback_t callback, struct XDPState *state) {
             if (wd_is_dir) {
                 if (event->len > 0 && strcmp(event->name, fn) == 0) {
                     if (event->mask & IN_CREATE) {
-                        dbg("%s created", event->name);
+                        dbg("%s created.", event->name);
                         callback(state, map_path);
                         inotify_rm_watch(fd, wd);
                         wd = -1;
                         break;
                     } else if (event->mask & IN_MOVED_TO) {
-                        dbg("%s moved in", event->name);
+                        dbg("%s moved in.", event->name);
                         callback(state, map_path);
                         inotify_rm_watch(fd, wd);
                         wd = -1;
@@ -135,16 +135,16 @@ bool watch(const char *map_path, callback_t callback, struct XDPState *state) {
                 }
             } else {
                 if (event->mask & IN_MODIFY) {
-                    dbg("%s modified", fullpath);
+                    dbg("%s modified.", fullpath);
                     callback(state, map_path);
                 } else if (event->mask & IN_MOVE_SELF) {
-                    dbg("%s moved out", fullpath);
+                    dbg("%s moved out.", fullpath);
                     callback(state, map_path);
                     inotify_rm_watch(fd, wd);
                     wd = -1;
                     break;
                 } else if (event->mask & IN_DELETE_SELF) {
-                    dbg("%s deleted", fullpath);
+                    dbg("%s deleted.", fullpath);
                     callback(state, map_path);
                     inotify_rm_watch(fd, wd);
                     wd = -1;
