@@ -427,67 +427,73 @@ int main(int argc, char *argv[]) {
         "             " DEFAULT_XDP ").\n"
         "  -V         Show version.\n"
         "  -h -?      Show usage.\n";
-    int i = 0;
     while ((ch = getopt(argc, argv, "cdfm:x:Vh?")) != -1) {
-        i++;
         switch (ch) {
-        case 'c':
-            clear_existing = 1;
-            // TODO: Implement.
-            break;
-        case 'd':
-            DEBUG = 1;
-            break;
-        case 'f':
-            foreground = 1;
-            // TODO: Implement.
-            break;
-        case 'm':
-            int map_length = strlen(optarg);
-            if (map_length <= 0) {
-                log_error("Invalid map file.");
-                return 1;
-            } else if (map_length > PATH_MAX) {
-                log_error("Map file path is too long.");
-                return 1;
-            } else {
-                strcpy(map_path, optarg);
+            case 'c': {
+                clear_existing = 1;
+                // TODO: Implement.
+                break;
             }
-            break;
-        case 'x':
-            int xdp_length = strlen(optarg);
-            if (xdp_length <= 0) {
-                log_error("Invalid XDP program file.");
-                return 1;
-            } else if (xdp_length > PATH_MAX) {
-                log_error("XDP program file path is too long.");
-                return 1;
-            } else {
-                strcpy(xdp_path, optarg);
+            case 'd': {
+                DEBUG = 1;
+                break;
             }
+            case 'f': {
+                foreground = 1;
+                // TODO: Implement.
+                break;
+            }
+            case 'm': {
+                int map_length = strlen(optarg);
+                if (map_length <= 0) {
+                    log_error("Invalid map file.");
+                    return 1;
+                } else if (map_length > PATH_MAX) {
+                    log_error("Map file path is too long.");
+                    return 1;
+                } else {
+                    strcpy(map_path, optarg);
+                }
+                break;
+            }
+            case 'x': {
+                int xdp_length = strlen(optarg);
+                if (xdp_length <= 0) {
+                    log_error("Invalid XDP program file.");
+                    return 1;
+                } else if (xdp_length > PATH_MAX) {
+                    log_error("XDP program file path is too long.");
+                    return 1;
+                } else {
+                    strcpy(xdp_path, optarg);
+                }
 
-            FILE *fp = fopen(xdp_path, "r");
-            if (fp == NULL) {
-                log_errno("fopen");
-                log_error("XDP program file could not be opened.");
-                return 1;
-            } else {
-                fclose(fp);
+                FILE *fp = fopen(xdp_path, "r");
+                if (fp == NULL) {
+                    log_errno("fopen");
+                    log_error("XDP program file could not be opened.");
+                    return 1;
+                } else {
+                    fclose(fp);
+                }
+                break;
             }
-            break;
-        case 'V':
-            printf("%s\n", version);
-            exit(0);
-            break;
-        case 'h':
-        case '?':
-            printf("%s\n", usage);
-            exit(0);
-            break;
-        default:
-            fprintf(stderr, "%s\n", usage);
-            exit(1);
-            break;
+            case 'V': {
+                printf("%s\n", version);
+                exit(0);
+                break;
+            }
+            case 'h':
+            case '?': {
+                printf("%s\n", usage);
+                exit(0);
+                break;
+            }
+            default: {
+                fprintf(stderr, "%s\n", usage);
+                exit(1);
+                break;
+            }
         }
     }
 
