@@ -14,6 +14,17 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
+// Allow turning debug printk on/off at build time to avoid the performance hit when not needed, and
+// to satisfy kernels that don't allow use of printk from BPF programs. Off by default.
+#ifndef BPF_DEBUG
+#define BPF_DEBUG 0
+#endif
+#if BPF_DEBUG
+#define BPF_DBG(fmt, ...) bpf_printk(fmt, ##__VA_ARGS__)
+#else
+#define BPF_DBG(fmt, ...) do { } while (0)
+#endif
+
 #include "shared.h"
 
 #define ETH_BCAST_MAC {0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
@@ -66,7 +77,7 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
     if (DEBUGTEST) {
         struct Device *d = bpf_map_lookup_elem(&device_map, &eth->h_source);
         if (d) {
-            bpf_printk(
+            BPF_DBG(
                 "softgre_apd: packet from %02x:%02x:%02x:%02x:%02x:%02x (gre_ip: %pI4 vlan: %d)",
                 eth->h_source[0],
                 eth->h_source[1],
@@ -86,12 +97,12 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
     // encapsulate the frame in an IP/GRE header and pass it up the stack.
     struct Device *src_device = bpf_map_lookup_elem(&device_map, &eth->h_source);
     if (src_device) {
-        bpf_printk("softgre_apd: encapsulate");
+        BPF_DBG("softgre_apd: encapsulate");
 
         // Get the IP config for this device.
         struct IPCfg *ip_cfg = bpf_map_lookup_elem(&ip_cfg_map, &src_device->gre_ip);
         if (!ip_cfg) {
-            bpf_printk("softgre_apd: no IP config for gre_ip %pI4", &src_device->gre_ip);
+            BPF_DBG("softgre_apd: no IP config for gre_ip %pI4", &src_device->gre_ip);
             return TC_ACT_OK;
         }
 
@@ -104,7 +115,7 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         struct gre_base_hdr *gre = NULL;
         unsigned short outer_size = sizeof(*gre) + sizeof(*outer_ip) + sizeof(*outer_eth);
         if (bpf_skb_adjust_room(skb, outer_size, BPF_ADJ_ROOM_MAC, 0)) {
-            bpf_printk("softgre_apd: bpf_skb_adjust_room on encap failed");
+            BPF_DBG("softgre_apd: bpf_skb_adjust_room on encap failed");
             return TC_ACT_SHOT;
         }
 
@@ -115,28 +126,28 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         // Get location of outer Ethernet header.
         outer_eth = data;
         if ((void *)(outer_eth + 1) > data_end) {
-            bpf_printk("softgre_apd: outer ethhdr out of bounds after adjust");
+            BPF_DBG("softgre_apd: outer ethhdr out of bounds after adjust");
             return TC_ACT_SHOT;
         }
 
         // Get location of outer IP header.
         outer_ip = (struct iphdr *)(outer_eth + 1);
         if ((void *)(outer_ip + 1) > data_end) {
-            bpf_printk("softgre_apd: outer iphdr out of bounds after adjust");
+            BPF_DBG("softgre_apd: outer iphdr out of bounds after adjust");
             return TC_ACT_SHOT;
         }
 
         // Get location of outer GRE header.
         gre = (struct gre_base_hdr *)(outer_ip + 1);
         if ((void *)(gre + 1) > data_end) {
-            bpf_printk("softgre_apd: gre header out of bounds after adjust");
+            BPF_DBG("softgre_apd: gre header out of bounds after adjust");
             return TC_ACT_SHOT;
         }
 
         // Get location of inner Ethernet header.
         inner_eth = (struct ethhdr *)(gre + 1);
         if ((void *)(inner_eth + 1) > data_end) {
-            bpf_printk("softgre_apd: inner ethhdr out of bounds after adjust");
+            BPF_DBG("softgre_apd: inner ethhdr out of bounds after adjust");
             return TC_ACT_SHOT;
         }
 
@@ -198,7 +209,7 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
 
     // Check source IP is in the IP config map.
     if (!bpf_map_lookup_elem(&ip_cfg_map, &ip->saddr)) {
-        bpf_printk("softgre_apd: source IP not in IP config map");
+        BPF_DBG("softgre_apd: source IP not in IP config map");
         return TC_ACT_OK;
     }
 
@@ -213,12 +224,12 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
     struct Device *dst_device = bpf_map_lookup_elem(&device_map, &inner_eth->h_dest);
     __u8 bcast = mac_eq(inner_eth->h_dest, (const __u8 [])ETH_BCAST_MAC);
     if (dst_device || bcast) {
-        bpf_printk("softgre_apd: decapsulate");
+        BPF_DBG("softgre_apd: decapsulate");
 
         // Shrink packet to remove GRE and IP headers.
         unsigned short shrink_size = sizeof(struct gre_base_hdr) + (ip->ihl * 4);
         if (bpf_skb_adjust_room(skb, -shrink_size, BPF_ADJ_ROOM_MAC, 0)) {
-            bpf_printk("softgre_apd: bpf_skb_adjust_room on decap failed");
+            BPF_DBG("softgre_apd: bpf_skb_adjust_room on decap failed");
             return TC_ACT_SHOT;
         }
 
