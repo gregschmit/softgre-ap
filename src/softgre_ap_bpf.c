@@ -47,22 +47,11 @@ static inline __u8 mac_eq(const __u8 *mac1, const __u8 *mac2) {
     return 1;
 }
 
-static inline __u16 ip_checksum(struct iphdr *ip) {
-    __u32 csum = 0;
-
-    // Sum all 16-bit words in the IP header.
-    __u16 *ptr = (__u16 *)ip;
-    for (int i = 0; i < (ip->ihl * 4) / 2; i++) {
-        csum += ptr[i];
-    }
-
-    // Fold carry bits.
-    while (csum >> 16) {
-        csum = (csum & 0xFFFF) + (csum >> 16);
-    }
-
-    // Return one's complement.
-    return ~csum;
+static inline __sum16 csum_fold(__wsum csum) {
+    __u32 sum = (__u32)csum;
+    sum = (sum & 0xffff) + (sum >> 16);
+    sum = (sum & 0xffff) + (sum >> 16);
+    return (__sum16)~sum;
 }
 
 SEC("tc/ingress")
@@ -115,7 +104,7 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         struct gre_base_hdr *gre = NULL;
         unsigned short outer_size = sizeof(*gre) + sizeof(*outer_ip) + sizeof(*outer_eth);
         if (bpf_skb_adjust_room(skb, outer_size, BPF_ADJ_ROOM_MAC, 0)) {
-            bpf_printk("softgre_apd: bpf_skb_adjust_room failed");
+            bpf_printk("softgre_apd: bpf_skb_adjust_room on encap failed");
             return TC_ACT_SHOT;
         }
 
@@ -145,21 +134,15 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         }
 
         // Get location of inner Ethernet header.
-        inner_eth = (struct ethhdr *)(outer_eth + 1 + sizeof(*outer_ip) + sizeof(*gre));
+        inner_eth = (struct ethhdr *)(gre + 1);
         if ((void *)(inner_eth + 1) > data_end) {
             bpf_printk("softgre_apd: inner ethhdr out of bounds after adjust");
             return TC_ACT_SHOT;
         }
 
-        // I don't actually think this is true, and Claude agrees with me. My confusion is that the
-        // docs say that using `bpf_skb_adjust_room` with the `BPF_ADJ_ROOM_MAC` flag will `Adjust
-        // room at the mac layer (room space is added or removed between the layer 2 and layer 3
-        // headers)` and that wording implies that the existing layer 2 header might stay at the
-        // same location. But Claude says that the existing layer 2 header is moved forward in the
-        // packet to make room for the new headers, which makes more sense. Will test.
-        // // Outer Ethernet header contains inner Ethernet header data; copy to inner Ethernet
-        // // header location.
-        // __builtin_memmove(inner_eth, outer_eth, sizeof(*outer_eth));
+        // Outer Ethernet header contains inner Ethernet header data; copy to inner Ethernet
+        // header location.
+        __builtin_memmove(inner_eth, outer_eth, sizeof(*outer_eth));
 
         // Write outer Ethernet header. Zero out the src/dst and we will use `bpf_redirect_neigh` to
         // let the kernel fill them in.
@@ -171,12 +154,14 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         __builtin_memset(outer_ip, 0, sizeof(*outer_ip));
         outer_ip->version = 4;
         outer_ip->ihl = 5;
-        outer_ip->tot_len = bpf_htons(outer_size + inner_size);
+        outer_ip->tot_len = bpf_htons(inner_size + sizeof(*gre) + sizeof(*outer_ip));
         outer_ip->ttl = 64;  // Common default TTL.
         outer_ip->protocol = IPPROTO_GRE;
         outer_ip->saddr = ip_cfg->src_ip.s_addr;
         outer_ip->daddr = ip_cfg->gre_ip.s_addr;
-        outer_ip->check = ip_checksum(outer_ip);
+        // outer_ip->check = ip_checksum(outer_ip, data_end);
+        __wsum csum = bpf_csum_diff(0, 0, (__be32 *)outer_ip, sizeof(*outer_ip), 0);
+        outer_ip->check = csum_fold(csum);
 
         // Write outer GRE header.
         gre->flags = 0;
@@ -233,7 +218,7 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         // Shrink packet to remove GRE and IP headers.
         unsigned short shrink_size = sizeof(struct gre_base_hdr) + (ip->ihl * 4);
         if (bpf_skb_adjust_room(skb, -shrink_size, BPF_ADJ_ROOM_MAC, 0)) {
-            bpf_printk("softgre_apd: bpf_skb_adjust_room failed");
+            bpf_printk("softgre_apd: bpf_skb_adjust_room on decap failed");
             return TC_ACT_SHOT;
         }
 
