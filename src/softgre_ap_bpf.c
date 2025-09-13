@@ -14,6 +14,17 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_endian.h>
 
+// Allow turning printk on/off at build time to satisfy kernels
+// that don't allow printing from XDP. Default: off.
+#ifndef XDP_ENABLE_PRINTK
+#define XDP_ENABLE_PRINTK 0
+#endif
+#if XDP_ENABLE_PRINTK
+#define XDP_LOG(fmt, ...) bpf_printk(fmt, ##__VA_ARGS__)
+#else
+#define XDP_LOG(fmt, ...) do { } while (0)
+#endif
+
 #include "shared.h"
 
 #define ETH_BCAST_MAC {0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
@@ -97,7 +108,7 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
     // encapsulate the frame in an IP/GRE header and pass it up the stack.
     struct Device *src_device = bpf_map_lookup_elem(&device_map, &eth->h_source);
     if (src_device) {
-        bpf_printk("softgre_apd: encapsulate");
+        XDP_LOG("softgre_apd: encapsulate");
 
         // Get the IP config for this device.
         struct IPCfg *ip_cfg = bpf_map_lookup_elem(&ip_cfg_map, &src_device->gre_ip);
@@ -115,7 +126,7 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         struct gre_base_hdr *gre = NULL;
         unsigned short outer_size = sizeof(*gre) + sizeof(*outer_ip) + sizeof(*outer_eth);
         if (bpf_skb_adjust_room(skb, outer_size, BPF_ADJ_ROOM_MAC, 0)) {
-            bpf_printk("softgre_apd: bpf_skb_adjust_room failed");
+            XDP_LOG("softgre_apd: bpf_skb_adjust_room failed");
             return TC_ACT_SHOT;
         }
 
@@ -213,7 +224,7 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
 
     // Check source IP is in the IP config map.
     if (!bpf_map_lookup_elem(&ip_cfg_map, &ip->saddr)) {
-        bpf_printk("softgre_apd: source IP not in IP config map");
+        XDP_LOG("softgre_apd: source IP not in IP config map");
         return TC_ACT_OK;
     }
 
@@ -228,12 +239,12 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
     struct Device *dst_device = bpf_map_lookup_elem(&device_map, &inner_eth->h_dest);
     __u8 bcast = mac_eq(inner_eth->h_dest, (const __u8 [])ETH_BCAST_MAC);
     if (dst_device || bcast) {
-        bpf_printk("softgre_apd: decapsulate");
+        XDP_LOG("softgre_apd: decapsulate");
 
         // Shrink packet to remove GRE and IP headers.
         unsigned short shrink_size = sizeof(struct gre_base_hdr) + (ip->ihl * 4);
         if (bpf_skb_adjust_room(skb, -shrink_size, BPF_ADJ_ROOM_MAC, 0)) {
-            bpf_printk("softgre_apd: bpf_skb_adjust_room failed");
+            XDP_LOG("softgre_apd: bpf_skb_adjust_room failed");
             return TC_ACT_SHOT;
         }
 
