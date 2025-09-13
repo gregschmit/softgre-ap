@@ -1,6 +1,6 @@
 VERSION = $(shell git describe --dirty 2>/dev/null)
 CFLAGS_COMMON = -g -Wall -DVERSION=\"$(VERSION)\"
-LIBS = -lbpf -lelf -lz -lzstd
+LIBS_USR = -lbpf -lelf -lz -lzstd
 
 # Since we have to use clang for BPF, use it for everything.
 CC = clang
@@ -9,20 +9,20 @@ CC = clang
 # that's also the endianness for most target architectures, but this could be set to `bpfel` or
 # `bpfeb` if we need to target a different endianness from the host.
 TARGET_BPF ?= bpf
-TARGET_BPF_FLAG = -target $(TARGET_BPF)
 
-# TODO: Figure out TARGET_USR_FLAG and what other options are needed for cross-compiling.
 TARGET_USR ?=
-TARGET_USR_FLAG = $(if $(TARGET_USR),-target $(TARGET_USR),)
 
-CFLAGS_BPF = $(CFLAGS_COMMON) -D__BPF__
+CFLAGS_BPF = $(CFLAGS_COMMON) -target $(TARGET_BPF)
+CFLAGS_BPF += -I/usr/include/x86_64-linux-gnu
 
-CFLAGS_USR = $(CFLAGS_COMMON)
+CFLAGS_USR = $(CFLAGS_COMMON) $(if $(TARGET_USR),-target $(TARGET_USR),)
+CFLAGS_USR += -I/usr/include/x86_64-linux-gnu
+CFLAGS_USR += -I/usr/include/aarch64-linux-gnu
 
 OBJFILES_USR = src/softgre_apd.o src/bpf_state.o src/list.o src/log.o src/shared.o src/watch.o
 
 ifeq ($(STATIC),1)
-	LIBS += -static
+	LIBS_USR += -static
 endif
 
 .PHONY: all
@@ -32,7 +32,7 @@ softgre_ap_bpf.o: src/softgre_ap_bpf.c
 	$(CC) $(CFLAGS_BPF) -O2 $(TARGET_BPF_FLAG) -c $^ -o $@
 
 softgre_apd: $(OBJFILES_USR)
-	$(CC) $(CFLAGS_USR) -O0 $(TARGET_USR_FLAG) $^ -o $@ $(LIBS)
+	$(CC) $(CFLAGS_USR) -O0 $(TARGET_USR_FLAG) $^ -o $@ $(LIBS_USR)
 
 $(OBJFILES_USR): %.o : %.c
 	$(CC) $(CFLAGS_USR) -O0 $(TARGET_USR_FLAG) -c $< -o $@
@@ -44,6 +44,11 @@ dev: softgre_ap_bpf.o softgre_apd
 .PHONY: static
 static:
 	$(MAKE) all STATIC=1
+
+.PHONY: cross
+cross:
+	# Assume aarch64 for now.
+	$(MAKE) all TARGET_USR=aarch64-linux-gnu
 
 .PHONY: docker_build
 docker_build:
