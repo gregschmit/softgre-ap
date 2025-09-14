@@ -1,6 +1,8 @@
 VERSION = $(shell git describe --dirty 2>/dev/null)
-CFLAGS_COMMON = -g -Wall -DVERSION=\"$(VERSION)\"
 LIBS_USR = -lbpf -lelf -lz -lzstd
+OLEVEL ?= 3
+BPF_DEBUG ?= 0
+CFLAGS_COMMON = -g -Wall -DVERSION=\"$(VERSION)\" -DBPF_DEBUG=$(BPF_DEBUG)
 
 # Since we have to use clang for BPF, use it for everything.
 CC = clang
@@ -29,13 +31,13 @@ endif
 all: softgre_ap_bpf.o softgre_apd
 
 softgre_ap_bpf.o: src/softgre_ap_bpf.c
-	$(CC) $(CFLAGS_BPF) -O2 $(TARGET_BPF_FLAG) -c $^ -o $@
+	$(CC) $(CFLAGS_BPF) -O$(OLEVEL) $(TARGET_BPF_FLAG) -c $^ -o $@
 
 softgre_apd: $(OBJFILES_USR)
-	$(CC) $(CFLAGS_USR) -O0 $(TARGET_USR_FLAG) $^ -o $@ $(LIBS_USR)
+	$(CC) $(CFLAGS_USR) -O$(OLEVEL) $(TARGET_USR_FLAG) $^ -o $@ $(LIBS_USR)
 
 $(OBJFILES_USR): %.o : %.c
-	$(CC) $(CFLAGS_USR) -O0 $(TARGET_USR_FLAG) -c $< -o $@
+	$(CC) $(CFLAGS_USR) -O$(OLEVEL) $(TARGET_USR_FLAG) -c $< -o $@
 
 dev: softgre_ap_bpf.o softgre_apd
 	@echo "Running dev configuration..."

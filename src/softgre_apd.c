@@ -41,16 +41,15 @@
 volatile bool INTERRUPT = false;
 
 // Static storage to hold all interface names, if needed.
-#define ALL_IFS_MAX 50
 #define ALL_IFS_MAX_STRLEN 256
-static char ALL_IFS[ALL_IFS_MAX][ALL_IFS_MAX_STRLEN] = {0};
-static char *ALL_IFS_PTRS[ALL_IFS_MAX] = {0};
+static char ALL_IFS[MAX_INTERFACES][ALL_IFS_MAX_STRLEN] = {0};
+static char *ALL_IFS_PTRS[MAX_INTERFACES] = {0};
 
 void interrupt_handler(int _signum) {
     INTERRUPT = true;
 }
 
-bool populate_ip_cfg_src_ip(struct IPCfg *ip_cfg) {
+bool populate_ip_cfg_src_ip(IPCfg *ip_cfg) {
     // Create UDP socket.
     int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (sockfd < 0) {
@@ -89,7 +88,7 @@ bool populate_ip_cfg_src_ip(struct IPCfg *ip_cfg) {
     return true;
 }
 
-bool populate_ip_cfg_ifindex(struct IPCfg *ip_cfg) {
+bool populate_ip_cfg_ifindex(IPCfg *ip_cfg) {
     if (!ip_cfg) { return false; }
 
     struct ifaddrs *ifaddr;
@@ -127,7 +126,7 @@ bool populate_ip_cfg_ifindex(struct IPCfg *ip_cfg) {
 }
 
 // Ensure `src_ip` is set to 0 if any of the population steps fail.
-bool populate_ip_cfg(struct IPCfg *ip_cfg) {
+bool populate_ip_cfg(IPCfg *ip_cfg) {
     if (!ip_cfg || !ip_cfg->gre_ip.s_addr) { return false; }
 
     // Determine src IP for this GRE IP.
@@ -170,7 +169,7 @@ void parse_map_file(const char *path, List *devices, List *ip_cfgs, uint8_t cycl
         if (linebuf[0] == '#') { continue; }
 
         // Parse the line, logging but otherwise disregarding any errors.
-        struct Device device = {.cycle = cycle};
+        Device device = {.cycle = cycle};
         char gre_ip[16] = "";
         int res = sscanf(
             linebuf,
@@ -196,7 +195,7 @@ void parse_map_file(const char *path, List *devices, List *ip_cfgs, uint8_t cycl
         }
 
         // See if we already have an IP Config.
-        struct IPCfg *ip_cfg = list__find(ip_cfgs, &device.gre_ip);
+        IPCfg *ip_cfg = list__find(ip_cfgs, &device.gre_ip);
         if (ip_cfg) {
             // If the config is not valid, then we previously failed to populate it, so skip this
             // device.
@@ -207,7 +206,7 @@ void parse_map_file(const char *path, List *devices, List *ip_cfgs, uint8_t cycl
             // We haven't seen this GRE IP before, so populate a new IP config and add it to the
             // list. If we fail to populate it fully, then skip this device. But add the IP config
             // regardless so we don't try again for subsequent devices with the same GRE IP.
-            struct IPCfg ip_cfg = {.gre_ip = device.gre_ip, .cycle = cycle};
+            IPCfg ip_cfg = {.gre_ip = device.gre_ip, .cycle = cycle};
             if (!populate_ip_cfg(&ip_cfg)) {
                 log_error("Failed to populate IP config for IP: %s", gre_ip);
                 continue;
@@ -259,11 +258,11 @@ void update_bpf_map(BPFState *state, const char *map_path) {
 
     // Create device and IP config lists.
     List *devices = list__new(
-        sizeof(struct Device), sizeof(uint8_t) * ETH_ALEN, (list__key_eq_t)device__key_eq
+        sizeof(Device), sizeof(uint8_t) * ETH_ALEN, (list__key_eq_t)device__key_eq
     );
     if (!devices) { return; }
     List *ip_cfgs = list__new(
-        sizeof(struct IPCfg), sizeof(struct in_addr), (list__key_eq_t)ip_cfg__key_eq
+        sizeof(IPCfg), sizeof(struct in_addr), (list__key_eq_t)ip_cfg__key_eq
     );
     if (!ip_cfgs) {
         list__free(devices);
@@ -288,7 +287,7 @@ void update_bpf_map(BPFState *state, const char *map_path) {
 
     // Update the IP config map.
     for (size_t i = 0; i < ip_cfgs->length; i++) {
-        struct IPCfg ip_cfg = ((struct IPCfg *)ip_cfgs->items)[i];
+        IPCfg ip_cfg = ((IPCfg *)ip_cfgs->items)[i];
 
         if (bpf_map__update_elem(
             ip_cfg_map,
@@ -305,7 +304,7 @@ void update_bpf_map(BPFState *state, const char *map_path) {
 
     // Update the device map.
     for (size_t i = 0; i < devices->length; i++) {
-        struct Device device = ((struct Device *)devices->items)[i];
+        Device device = ((Device *)devices->items)[i];
         if (bpf_map__update_elem(
             device_map,
             &device.mac,
@@ -343,7 +342,7 @@ unsigned populate_all_ifs() {
 
     unsigned count = 0;
     for (struct ifaddrs *ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
-        if (count >= ALL_IFS_MAX) { break; }
+        if (count >= MAX_INTERFACES) { break; }
         if (ifa->ifa_addr == NULL) { continue; }
 
         // Only consider L2 interfaces.
@@ -533,13 +532,19 @@ int main(int argc, char *argv[]) {
         num_ifs = populate_all_ifs();
 
         // Create array of pointers to each interface string.
-        for (unsigned i = 0; i < num_ifs && i < ALL_IFS_MAX; i++) {
+        for (unsigned i = 0; i < MAX_INTERFACES && i < num_ifs; i++) {
             ALL_IFS_PTRS[i] = ALL_IFS[i];
         }
         ifs = ALL_IFS_PTRS;
     } else {
         num_ifs = argc - optind;
         ifs = argv + optind;
+
+        // Enforce max interfaces.
+        if (num_ifs > MAX_INTERFACES) {
+            log_info("Max interfaces is %d; truncating list.", MAX_INTERFACES);
+            num_ifs = MAX_INTERFACES;
+        }
     }
 
     if (num_ifs == 0) {

@@ -246,7 +246,7 @@ void bpf_state__remove_stale_devices(BPFState *state, List *devices) {
         res = bpf_map__get_next_key(device_map, key, next_key, ETH_ALEN);
 
         // Look up the device to check its cycle.
-        struct Device device;
+        Device device;
         if (bpf_map__lookup_elem(device_map, key, ETH_ALEN, &device, sizeof(device), 0)) {
             log_error("Failed to look up device in Device map.");
             return;
@@ -294,7 +294,7 @@ void bpf_state__remove_stale_ip_cfgs(BPFState *state, List *ip_cfgs) {
         res = bpf_map__get_next_key(ip_cfg_map, &key, &next_key, sizeof(next_key));
 
         // Look up the IP config to check its cycle.
-        struct IPCfg ip_cfg;
+        IPCfg ip_cfg;
         if (bpf_map__lookup_elem(ip_cfg_map, &key, sizeof(key), &ip_cfg, sizeof(ip_cfg), 0)) {
             log_error("Failed to look up IP config in IP Config map.");
             return;

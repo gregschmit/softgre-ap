@@ -21,7 +21,7 @@ bool ip_cfg__key_eq(const struct in_addr *key1, const struct in_addr *key2) {
 
 // Use the src_ip to determine validity. In the program logic, if there is a problem populating part
 // of the config, then the src_ip should be set to 0.
-bool ip_cfg__is_valid(const struct IPCfg *ip_cfg) {
+bool ip_cfg__is_valid(const IPCfg *ip_cfg) {
     if (!ip_cfg) { return false; }
     if (ip_cfg->src_ip.s_addr == 0) { return false; }
 
