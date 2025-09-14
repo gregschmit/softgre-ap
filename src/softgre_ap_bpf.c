@@ -287,12 +287,6 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
     if (dst_device || bcast) {
         BPF_DBGV("Decapsulating.");
 
-        // Check that this Device has an ifindex.
-        if (!dst_device->ifindex) {
-            BPF_DBG("No ifindex for dst device.");
-            return TC_ACT_SHOT;
-        }
-
         // Shrink packet to remove GRE and IP headers.
         unsigned short shrink_size = sizeof(struct gre_base_hdr) + (ip->ihl * 4);
         if (bpf_skb_adjust_room(skb, -shrink_size, BPF_ADJ_ROOM_MAC, 0)) {
@@ -302,6 +296,12 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
     }
 
     if (dst_device) {
+        // Check that this Device has an ifindex.
+        if (!dst_device->ifindex) {
+            BPF_DBG("No ifindex for dst device.");
+            return TC_ACT_SHOT;
+        }
+
         // Redirect to the device's ifindex.
         return bpf_redirect(dst_device->ifindex, 0);
     } else if (bcast) {
