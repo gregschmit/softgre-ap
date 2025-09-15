@@ -9,4 +9,8 @@ decapsulation of packets between the client and the GRE IP endpoint.
 
 ## TODO
 
-- Implement VLAN-awareness
+- Modify Map file format to support multiple protocols.
+- Implement GRE over UDP to support NAT.
+- Implement VXLAN.
+- Implement L2TPv3.
+- Add support for IPv6 endpoints.

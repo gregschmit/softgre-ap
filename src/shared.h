@@ -13,9 +13,16 @@
 // BPF program: use kernel headers.
 #include <linux/if_ether.h>
 #include <linux/in.h>
+#include <linux/types.h>
 
+// Define types that are not available in BPF context. I have no idea why including `linux/types.h`
+// doesn't define these.
 typedef __u8 uint8_t;
 typedef __u16 uint16_t;
+typedef __u32 uint32_t;
+typedef _Bool bool;
+#define true 1
+#define false 0
 #else
 // Userspace daemon: use standard library headers.
 #include <netinet/ether.h>

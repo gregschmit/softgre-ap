@@ -5,6 +5,7 @@
  */
 
 #include <linux/bpf.h>
+
 #include <linux/if_ether.h>
 #include <linux/if_vlan.h>
 #include <linux/in.h>
@@ -35,9 +36,16 @@
 #define BPF_DBG(fmt, ...) do { } while (0)
 #endif
 
+// Kernel definitions that are missing from kernel headers due to BPF context restrictions. I have
+// no idea why things like `ethhdr` and `iphdr` are available but not `gre_base_hdr`.
+#define VLAN_VID_MASK 0x0fff
 struct gre_base_hdr {
     __be16 flags;
     __be16 protocol;
+};
+struct vlan_hdr {
+    __be16 h_vlan_TCI;
+    __be16 h_vlan_encapsulated_proto;
 };
 
 struct {
@@ -61,19 +69,38 @@ struct {
     __type(value, VLANCfg);
 } vlan_cfg_map SEC(".maps");
 
-static inline __u8 mac_eq(const __u8 *mac1, const __u8 *mac2) {
-    for (__u8 i = 0; i < ETH_ALEN; i++) {
-        if (mac1[i] != mac2[i]) { return 0; }
+static inline bool mac_eq(const uint8_t *mac1, const uint8_t *mac2) {
+    for (uint8_t i = 0; i < ETH_ALEN; i++) {
+        if (mac1[i] != mac2[i]) { return false; }
     }
 
-    return 1;
+    return true;
 }
 
 static inline __sum16 csum_fold(__wsum csum) {
-    __u32 sum = (__u32)csum;
+    uint32_t sum = (uint32_t)csum;
     sum = (sum & 0xffff) + (sum >> 16);
     sum = (sum & 0xffff) + (sum >> 16);
     return (__sum16)~sum;
+}
+
+// May modify skb, so pointers must be recalculated.
+static inline bool enforce_vlan(struct __sk_buff *skb, Device *device) {
+    if (device->vlan) {
+        // Ensure the VLAN tag is present and correct.
+        if (bpf_skb_vlan_push(skb, bpf_htons(ETH_P_8021Q), device->vlan)) {
+            BPF_DBG("Failed to push VLAN tag.");
+            return false;
+        }
+    } else {
+        // Remove VLAN tag, if present.
+        if (skb->vlan_present && bpf_skb_vlan_pop(skb)) {
+            BPF_DBG("Failed to remove VLAN tag.");
+            return false;
+        }
+    }
+
+    return true;
 }
 
 SEC("tc/ingress")
@@ -106,54 +133,53 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
     // Encapsulation:
     // If the source MAC is in the Device map, then it's coming from a client, so we should
     // encapsulate the frame in an IP/GRE header and pass it up the stack.
-    Device *src_device = bpf_map_lookup_elem(&device_map, &eth->h_source);
-    if (src_device) {
+    Device *src_dev = bpf_map_lookup_elem(&device_map, &eth->h_source);
+    if (src_dev) {
         BPF_DBGV("Encapsulating.");
 
         // Annotate the Device's ifindex if not already set.
-        if (!src_device->ifindex) {
-            src_device->ifindex = skb->ifindex;
-            if (bpf_map_update_elem(&device_map, &eth->h_source, src_device, BPF_EXIST)) {
+        if (!src_dev->ifindex) {
+            src_dev->ifindex = skb->ifindex;
+            if (bpf_map_update_elem(&device_map, &eth->h_source, src_dev, BPF_EXIST)) {
                 BPF_DBG("Failed to update device ifindex.");
                 return TC_ACT_SHOT;
             }
 
             // Also create/update a VLANCfg entry for this VLAN, if it doesn't already exist.
-            __u16 vlan_id = 0;
-            VLANCfg *vlan_cfg = bpf_map_lookup_elem(&vlan_cfg_map, &vlan_id);
+            VLANCfg *vlan_cfg = bpf_map_lookup_elem(&vlan_cfg_map, &src_dev->vlan);
             if (vlan_cfg) {
-                // Ensure src_device->ifindex is in the ifindexes array.
-                __u8 found = 0;
-                __u8 inserted = 0;
+                // Ensure src_dev->ifindex is in the ifindexes array.
+                bool found = false;
+                bool inserted = false;
                 for (unsigned i = 0; i < MAX_INTERFACES; i++) {
-                    if (vlan_cfg->ifindexes[i] == src_device->ifindex) {
+                    if (vlan_cfg->ifindexes[i] == src_dev->ifindex) {
                         // Already present, so nothing to do.
-                        found = 1;
+                        found = true;
                         break;
                     } else if (vlan_cfg->ifindexes[i] == 0) {
                         // Found an empty slot, so add it here.
-                        vlan_cfg->ifindexes[i] = src_device->ifindex;
-                        inserted = 1;
+                        vlan_cfg->ifindexes[i] = src_dev->ifindex;
+                        inserted = true;
                         break;
                     }
                 }
 
                 if (inserted) {
-                    if (bpf_map_update_elem(&vlan_cfg_map, &vlan_id, vlan_cfg, BPF_EXIST)) {
+                    if (bpf_map_update_elem(&vlan_cfg_map, &src_dev->vlan, vlan_cfg, BPF_EXIST)) {
                         BPF_DBG("Failed to update VLAN config.");
                         return TC_ACT_SHOT;
                     }
                 }
 
                 if (!found && !inserted) {
-                    BPF_DBG("VLAN cfg ifindexes full, cannot add ifindex %d.", src_device->ifindex);
+                    BPF_DBG("VLAN cfg ifindexes full, cannot add ifindex %d.", src_dev->ifindex);
                     return TC_ACT_SHOT;
                 }
              } else {
                 // Create a new VLAN cfg.
-                VLANCfg new_vlan_cfg = {.vlan = vlan_id, .ifindexes = {0}};
-                new_vlan_cfg.ifindexes[0] = src_device->ifindex;
-                if (bpf_map_update_elem(&vlan_cfg_map, &vlan_id, &new_vlan_cfg, BPF_NOEXIST)) {
+                VLANCfg new_cfg = {.vlan = src_dev->vlan, .ifindexes = {0}};
+                new_cfg.ifindexes[0] = src_dev->ifindex;
+                if (bpf_map_update_elem(&vlan_cfg_map, &src_dev->vlan, &new_cfg, BPF_NOEXIST)) {
                     BPF_DBG("Failed to create VLAN config.");
                     return TC_ACT_SHOT;
                 }
@@ -161,13 +187,21 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         }
 
         // Get the IP config for this device.
-        IPCfg *ip_cfg = bpf_map_lookup_elem(&ip_cfg_map, &src_device->gre_ip);
+        IPCfg *ip_cfg = bpf_map_lookup_elem(&ip_cfg_map, &src_dev->gre_ip);
         if (!ip_cfg) {
-            BPF_DBG("No IP config for gre_ip %pI4.", &src_device->gre_ip);
+            BPF_DBG("No IP config for gre_ip %pI4.", &src_dev->gre_ip);
             return TC_ACT_OK;
         }
 
-        // Expand packet to cover both GRE header and IP header.
+        // Enforce VLAN from Device entry, and update data pointers.
+        if (!enforce_vlan(skb, src_dev)) {
+            BPF_DBG("Failed to enforce VLAN.");
+            return TC_ACT_SHOT;
+        }
+        data = (void *)(long)skb->data;
+        data_end = (void *)(long)skb->data_end;
+
+        // Expand packet to cover outer Ethernet/GRE/IP header.
         // NOTE: Assumes we only need space for minimal (ihl=5) IP header.
         unsigned short inner_size = data_end - data;
         struct ethhdr *inner_eth = NULL;
@@ -231,7 +265,6 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         outer_ip->protocol = IPPROTO_GRE;
         outer_ip->saddr = ip_cfg->src_ip.s_addr;
         outer_ip->daddr = ip_cfg->gre_ip.s_addr;
-        // outer_ip->check = ip_checksum(outer_ip, data_end);
         __wsum csum = bpf_csum_diff(0, 0, (__be32 *)outer_ip, sizeof(*outer_ip), 0);
         outer_ip->check = csum_fold(csum);
 
@@ -282,9 +315,9 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
     struct ethhdr *inner_eth = inner_frame;
     if ((void *)(inner_eth + 1) > data_end) { return TC_ACT_OK; }
 
-    Device *dst_device = bpf_map_lookup_elem(&device_map, &inner_eth->h_dest);
-    __u8 bcast = mac_eq(inner_eth->h_dest, (const __u8 [])ETH_BCAST_MAC);
-    if (dst_device || bcast) {
+    Device *dst_dev = bpf_map_lookup_elem(&device_map, &inner_eth->h_dest);
+    bool bcast = mac_eq(inner_eth->h_dest, (const uint8_t[])ETH_BCAST_MAC);
+    if (dst_dev || bcast) {
         BPF_DBGV("Decapsulating.");
 
         // Shrink packet to remove GRE and IP headers.
@@ -295,18 +328,28 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         }
     }
 
-    if (dst_device) {
+    if (dst_dev) {
         // Check that this Device has an ifindex.
-        if (!dst_device->ifindex) {
+        if (!dst_dev->ifindex) {
             BPF_DBG("No ifindex for dst device.");
             return TC_ACT_SHOT;
         }
 
         // Redirect to the device's ifindex.
-        return bpf_redirect(dst_device->ifindex, 0);
+        return bpf_redirect(dst_dev->ifindex, 0);
     } else if (bcast) {
-        // Redirect to all interfaces hosting native devices.
-        __u16 vlan_id = 0;
+        // Extract VLAN ID from inner Ethernet header, if present.
+        uint16_t vlan_id = 0;
+        if (inner_eth->h_proto == bpf_htons(ETH_P_8021Q)) {
+            struct vlan_hdr *vlan = (void *)(inner_eth + 1);
+            if ((void *)(vlan + 1) > data_end) {
+                BPF_DBG("VLAN header out of bounds.");
+                return TC_ACT_SHOT;
+            }
+            vlan_id = bpf_ntohs(vlan->h_vlan_TCI) & VLAN_VID_MASK;
+        }
+
+        // Redirect to all interfaces hosting this VLAN, if any.
         VLANCfg *vlan_cfg = bpf_map_lookup_elem(&vlan_cfg_map, &vlan_id);
         if (vlan_cfg) {
             for (unsigned i = 0; i < MAX_INTERFACES && vlan_cfg->ifindexes[i]; i++) {
