@@ -441,7 +441,7 @@ int main(int argc, char *argv[]) {
                 break;
             }
             case 'd': {
-                DEBUG = 1;
+                DEBUG = true;
                 break;
             }
             case 'f': {

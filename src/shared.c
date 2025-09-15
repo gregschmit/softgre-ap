@@ -9,7 +9,7 @@
 
 #include "shared.h"
 
-int DEBUG = 0;
+bool DEBUG = false;
 
 bool device__key_eq(const uint8_t *key1, const uint8_t *key2) {
     return memcmp(key1, key2, ETH_ALEN) == 0;
