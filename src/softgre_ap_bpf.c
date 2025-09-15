@@ -133,14 +133,14 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
     // Encapsulation:
     // If the source MAC is in the Device map, then it's coming from a client, so we should
     // encapsulate the frame in an IP/GRE header and pass it up the stack.
-    Device *src_dev = bpf_map_lookup_elem(&device_map, &eth->h_source);
+    Device *src_dev = bpf_map_lookup_elem(&device_map, &outer_eth->h_source);
     if (src_dev) {
         BPF_DBGV("Encapsulating.");
 
         // Annotate the Device's ifindex if not already set.
         if (!src_dev->ifindex) {
             src_dev->ifindex = skb->ifindex;
-            if (bpf_map_update_elem(&device_map, &eth->h_source, src_dev, BPF_EXIST)) {
+            if (bpf_map_update_elem(&device_map, &outer_eth->h_source, src_dev, BPF_EXIST)) {
                 BPF_DBG("Failed to update device ifindex.");
                 return TC_ACT_SHOT;
             }
@@ -204,10 +204,10 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         // Expand packet to cover outer Ethernet/GRE/IP header.
         // NOTE: Assumes we only need space for minimal (ihl=5) IP header.
         unsigned short inner_size = data_end - data;
-        struct iphdr *outer_ip = NULL;
+        struct iphdr *ip = NULL;
         struct gre_base_hdr *gre = NULL;
         struct ethhdr *inner_eth = NULL;
-        unsigned short outer_size = sizeof(*outer_eth) + sizeof(*outer_ip) + sizeof(*gre);
+        unsigned short outer_size = sizeof(*outer_eth) + sizeof(*ip) + sizeof(*gre);
         if (bpf_skb_adjust_room(skb, outer_size, BPF_ADJ_ROOM_MAC, 0)) {
             BPF_DBG("Failed to expand frame (`bpf_skb_adjust_room`).");
             return TC_ACT_SHOT;
@@ -225,14 +225,14 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         }
 
         // Get location of outer IP header.
-        outer_ip = (struct iphdr *)(outer_eth + 1);
-        if ((void *)(outer_ip + 1) > data_end) {
+        ip = (struct iphdr *)(outer_eth + 1);
+        if ((void *)(ip + 1) > data_end) {
             BPF_DBG("Outer IP header out of bounds after expand.");
             return TC_ACT_SHOT;
         }
 
         // Get location of outer GRE header.
-        gre = (struct gre_base_hdr *)(outer_ip + 1);
+        gre = (struct gre_base_hdr *)(ip + 1);
         if ((void *)(gre + 1) > data_end) {
             BPF_DBG("GRE header out of bounds after expand.");
             return TC_ACT_SHOT;
@@ -256,16 +256,16 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
 
         // Write outer IP header.
         // NOTE: This is a minimal IPv4 header (ihl=5).
-        __builtin_memset(outer_ip, 0, sizeof(*outer_ip));
-        outer_ip->version = 4;
-        outer_ip->ihl = 5;
-        outer_ip->tot_len = bpf_htons(inner_size + sizeof(*gre) + sizeof(*outer_ip));
-        outer_ip->ttl = 64;  // Common default TTL.
-        outer_ip->protocol = IPPROTO_GRE;
-        outer_ip->saddr = ip_cfg->src_ip.s_addr;
-        outer_ip->daddr = ip_cfg->gre_ip.s_addr;
-        __wsum csum = bpf_csum_diff(0, 0, (__be32 *)outer_ip, sizeof(*outer_ip), 0);
-        outer_ip->check = csum_fold(csum);
+        __builtin_memset(ip, 0, sizeof(*ip));
+        ip->version = 4;
+        ip->ihl = 5;
+        ip->tot_len = bpf_htons(inner_size + sizeof(*gre) + sizeof(*ip));
+        ip->ttl = 64;  // Common default TTL.
+        ip->protocol = IPPROTO_GRE;
+        ip->saddr = ip_cfg->src_ip.s_addr;
+        ip->daddr = ip_cfg->gre_ip.s_addr;
+        __wsum csum = bpf_csum_diff(0, 0, (__be32 *)ip, sizeof(*ip), 0);
+        ip->check = csum_fold(csum);
 
         // Write outer GRE header.
         gre->flags = 0;
@@ -283,10 +283,10 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
     // GRE tunnel.
 
     // Check (untagged) IP EtherType.
-    if (bpf_ntohs(eth->h_proto) != ETH_P_IP) { return TC_ACT_OK; }
+    if (bpf_ntohs(outer_eth->h_proto) != ETH_P_IP) { return TC_ACT_OK; }
 
     // Check for valid IP header.
-    struct iphdr *ip = (struct iphdr *)(eth + 1);
+    struct iphdr *ip = (struct iphdr *)(outer_eth + 1);
     if ((void *)(ip + 1) > data_end) { return TC_ACT_OK; }
 
     // Verify it's a minimal IPv4 GRE packet.
@@ -320,7 +320,7 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         BPF_DBGV("Decapsulating.");
 
         // Shrink packet to remove outer Ethernet/IP/GRE headers.
-        unsigned short shrink_size = sizeof(*eth) + (ip->ihl * 4) + sizeof(*gre);
+        unsigned short shrink_size = sizeof(*outer_eth) + (ip->ihl * 4) + sizeof(*gre);
         if (bpf_skb_adjust_room(skb, -shrink_size, BPF_ADJ_ROOM_MAC, 0)) {
             BPF_DBG("Failed to shrink frame (`bpf_skb_adjust_room`).");
             return TC_ACT_SHOT;
@@ -337,16 +337,7 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
             return TC_ACT_SHOT;
         }
 
-        if (dst_dev) {
-            // Check that this Device has an ifindex.
-            if (!dst_dev->ifindex) {
-                BPF_DBG("No ifindex for dst device.");
-                return TC_ACT_SHOT;
-            }
-
-            // Redirect to the device's ifindex.
-            return bpf_redirect(dst_dev->ifindex, 0);
-        } else if (bcast) {
+        if (bcast) {
             // Extract VLAN ID from inner Ethernet header, if present.
             uint16_t vlan_id = 0;
             if (inner_eth->h_proto == bpf_htons(ETH_P_8021Q)) {
@@ -368,6 +359,15 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
 
             // Lose the original packet.
             return TC_ACT_SHOT;
+        } else if (dst_dev) {
+            // Check that this Device has an ifindex.
+            if (!dst_dev->ifindex) {
+                BPF_DBG("No ifindex for dst device.");
+                return TC_ACT_SHOT;
+            }
+
+            // Redirect to the device's ifindex.
+            return bpf_redirect(dst_dev->ifindex, 0);
         }
     }
 
