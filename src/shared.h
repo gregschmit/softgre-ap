@@ -27,6 +27,7 @@
 // doesn't define these. This is another weird spot where I would expect to be able to use `u32`,
 // for example, and I could with BPF CO-RE, but that has other disadvantages as mentioned above, so
 // I'm sticking to just defining the types I want to use here.
+typedef __u64 size_t;
 typedef __u8 uint8_t;
 typedef __u16 uint16_t;
 typedef __u32 uint32_t;
