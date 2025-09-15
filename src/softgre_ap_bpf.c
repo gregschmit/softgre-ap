@@ -109,20 +109,20 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
     void *data = (void *)(long)skb->data;
 
     // Check for valid Ethernet header.
-    struct ethhdr *eth = data;
-    if ((void *)(eth + 1) > data_end) { return TC_ACT_OK; }
+    struct ethhdr *outer_eth = data;
+    if ((void *)(outer_eth + 1) > data_end) { return TC_ACT_OK; }
 
     if (DEBUGTEST) {
-        Device *d = bpf_map_lookup_elem(&device_map, &eth->h_source);
+        Device *d = bpf_map_lookup_elem(&device_map, &outer_eth->h_source);
         if (d) {
             BPF_DBGV(
                 "Frame from %02x:%02x:%02x:%02x:%02x:%02x (gre_ip: %pI4 vlan: %d).",
-                eth->h_source[0],
-                eth->h_source[1],
-                eth->h_source[2],
-                eth->h_source[3],
-                eth->h_source[4],
-                eth->h_source[5],
+                outer_eth->h_source[0],
+                outer_eth->h_source[1],
+                outer_eth->h_source[2],
+                outer_eth->h_source[3],
+                outer_eth->h_source[4],
+                outer_eth->h_source[5],
                 &d->gre_ip,
                 d->vlan
             );
@@ -204,45 +204,44 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         // Expand packet to cover outer Ethernet/GRE/IP header.
         // NOTE: Assumes we only need space for minimal (ihl=5) IP header.
         unsigned short inner_size = data_end - data;
-        struct ethhdr *inner_eth = NULL;
-        struct ethhdr *outer_eth = NULL;
         struct iphdr *outer_ip = NULL;
         struct gre_base_hdr *gre = NULL;
-        unsigned short outer_size = sizeof(*gre) + sizeof(*outer_ip) + sizeof(*outer_eth);
+        struct ethhdr *inner_eth = NULL;
+        unsigned short outer_size = sizeof(*outer_eth) + sizeof(*outer_ip) + sizeof(*gre);
         if (bpf_skb_adjust_room(skb, outer_size, BPF_ADJ_ROOM_MAC, 0)) {
             BPF_DBG("Failed to expand frame (`bpf_skb_adjust_room`).");
             return TC_ACT_SHOT;
         }
 
-        // Must recalculate data pointers after adjusting head.
+        // Update data pointers after expanding frame.
         data = (void *)(long)skb->data;
         data_end = (void *)(long)skb->data_end;
 
         // Get location of outer Ethernet header.
         outer_eth = data;
         if ((void *)(outer_eth + 1) > data_end) {
-            BPF_DBG("Outer Ethernet header out of bounds after adjust.");
+            BPF_DBG("Outer Ethernet header out of bounds after expand.");
             return TC_ACT_SHOT;
         }
 
         // Get location of outer IP header.
         outer_ip = (struct iphdr *)(outer_eth + 1);
         if ((void *)(outer_ip + 1) > data_end) {
-            BPF_DBG("Outer IP header out of bounds after adjust.");
+            BPF_DBG("Outer IP header out of bounds after expand.");
             return TC_ACT_SHOT;
         }
 
         // Get location of outer GRE header.
         gre = (struct gre_base_hdr *)(outer_ip + 1);
         if ((void *)(gre + 1) > data_end) {
-            BPF_DBG("GRE header out of bounds after adjust.");
+            BPF_DBG("GRE header out of bounds after expand.");
             return TC_ACT_SHOT;
         }
 
         // Get location of inner Ethernet header.
         inner_eth = (struct ethhdr *)(gre + 1);
         if ((void *)(inner_eth + 1) > data_end) {
-            BPF_DBG("Inner Ethernet header out of bounds after adjust.");
+            BPF_DBG("Inner Ethernet header out of bounds after expand.");
             return TC_ACT_SHOT;
         }
 
@@ -320,45 +319,56 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
     if (dst_dev || bcast) {
         BPF_DBGV("Decapsulating.");
 
-        // Shrink packet to remove GRE and IP headers.
-        unsigned short shrink_size = sizeof(struct gre_base_hdr) + (ip->ihl * 4);
+        // Shrink packet to remove outer Ethernet/IP/GRE headers.
+        unsigned short shrink_size = sizeof(*eth) + (ip->ihl * 4) + sizeof(*gre);
         if (bpf_skb_adjust_room(skb, -shrink_size, BPF_ADJ_ROOM_MAC, 0)) {
             BPF_DBG("Failed to shrink frame (`bpf_skb_adjust_room`).");
             return TC_ACT_SHOT;
         }
-    }
 
-    if (dst_dev) {
-        // Check that this Device has an ifindex.
-        if (!dst_dev->ifindex) {
-            BPF_DBG("No ifindex for dst device.");
+        // Update data pointers after shrinking frame.
+        data = (void *)(long)skb->data;
+        data_end = (void *)(long)skb->data_end;
+
+        // "Inner" Ethernet header is now at the start of the packet.
+        inner_eth = data;
+        if ((void *)(inner_eth + 1) > data_end) {
+            BPF_DBG("Inner Ethernet header out of bounds after shrink.");
             return TC_ACT_SHOT;
         }
 
-        // Redirect to the device's ifindex.
-        return bpf_redirect(dst_dev->ifindex, 0);
-    } else if (bcast) {
-        // Extract VLAN ID from inner Ethernet header, if present.
-        uint16_t vlan_id = 0;
-        if (inner_eth->h_proto == bpf_htons(ETH_P_8021Q)) {
-            struct vlan_hdr *vlan = (void *)(inner_eth + 1);
-            if ((void *)(vlan + 1) > data_end) {
-                BPF_DBG("VLAN header out of bounds.");
+        if (dst_dev) {
+            // Check that this Device has an ifindex.
+            if (!dst_dev->ifindex) {
+                BPF_DBG("No ifindex for dst device.");
                 return TC_ACT_SHOT;
             }
-            vlan_id = bpf_ntohs(vlan->h_vlan_TCI) & VLAN_VID_MASK;
-        }
 
-        // Redirect to all interfaces hosting this VLAN, if any.
-        VLANCfg *vlan_cfg = bpf_map_lookup_elem(&vlan_cfg_map, &vlan_id);
-        if (vlan_cfg) {
-            for (unsigned i = 0; i < MAX_INTERFACES && vlan_cfg->ifindexes[i]; i++) {
-                bpf_clone_redirect(skb, vlan_cfg->ifindexes[i], 0);
+            // Redirect to the device's ifindex.
+            return bpf_redirect(dst_dev->ifindex, 0);
+        } else if (bcast) {
+            // Extract VLAN ID from inner Ethernet header, if present.
+            uint16_t vlan_id = 0;
+            if (inner_eth->h_proto == bpf_htons(ETH_P_8021Q)) {
+                struct vlan_hdr *vlan = (void *)(inner_eth + 1);
+                if ((void *)(vlan + 1) > data_end) {
+                    BPF_DBG("VLAN header out of bounds.");
+                    return TC_ACT_SHOT;
+                }
+                vlan_id = bpf_ntohs(vlan->h_vlan_TCI) & VLAN_VID_MASK;
             }
-        }
 
-        // Lose the original packet.
-        return TC_ACT_SHOT;
+            // Redirect to all interfaces hosting this VLAN, if any.
+            VLANCfg *vlan_cfg = bpf_map_lookup_elem(&vlan_cfg_map, &vlan_id);
+            if (vlan_cfg) {
+                for (unsigned i = 0; i < MAX_INTERFACES && vlan_cfg->ifindexes[i]; i++) {
+                    bpf_clone_redirect(skb, vlan_cfg->ifindexes[i], 0);
+                }
+            }
+
+            // Lose the original packet.
+            return TC_ACT_SHOT;
+        }
     }
 
     // All other cases, pass the packet up the stack unmodified.
