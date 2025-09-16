@@ -7,6 +7,7 @@
 #include <linux/bpf.h>
 
 #include <linux/if_ether.h>
+#include <linux/if_packet.h>
 #include <linux/if_vlan.h>
 #include <linux/in.h>
 #include <linux/ip.h>
@@ -102,7 +103,7 @@ static inline void update_data_pointers(struct __sk_buff *skb, void **data, void
     *data_end = (void *)(long)skb->data_end;
 }
 
-SEC("tc/ingress")
+SEC("tcx/ingress")
 int bpf_softgre_ap(struct __sk_buff *skb) {
     long r;  // Return value of BPF helper functions.
     void *data_end = (void *)(long)skb->data_end;
@@ -227,14 +228,16 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         //     bpf_ntohs(skb->protocol),
         //     skb->vlan_present
         // );
+        // Have to use `bpf_skb_change_head otherwise it will error for e.g. ARP packets.
         if ((r = bpf_skb_change_head(skb, expand_size, 0))) {
             BPF_DBG("DROP; Failed to expand frame (%ld).", r);
             return TC_ACT_SHOT;
         }
-        if ((r = bpf_skb_vlan_pop(skb))) {
-            BPF_DBG("DROP; Failed to remove existing VLAN tag (%ld).", r);
-            return TC_ACT_SHOT;
-        }
+        // TODO: Consider re-enabling to prevent VLAN spoofing or accidental Q-in-Q.
+        // if ((r = bpf_skb_vlan_pop(skb))) {
+        //     BPF_DBG("DROP; Failed to remove existing VLAN tag (%ld).", r);
+        //     return TC_ACT_SHOT;
+        // }
         update_data_pointers(skb, &data, &data_end);
 
         // Get location of outer Ethernet header.
@@ -310,6 +313,14 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         // Write outer GRE header.
         gre->flags = 0;
         gre->protocol = bpf_htons(ETH_P_TEB);
+
+        // Fix packet type for broadcast packets (like ARP) to try to make them go out. Right now
+        // they seem to be silently dropped...
+        bpf_skb_change_type(skb, PACKET_OUTGOING);
+
+        BPF_DBGV(
+            "Redirecting pkt_type: %d protocol: 0x%04x", skb->pkt_type, bpf_ntohs(skb->protocol)
+        );
 
         return bpf_redirect_neigh(ip_cfg->ifindex, NULL, 0, 0);
     }
