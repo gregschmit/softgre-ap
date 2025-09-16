@@ -22,8 +22,10 @@ BPFState *bpf_state__open(char *bpf_path, unsigned num_ifs, char **ifs);
 
 struct bpf_map *bpf_state__get_device_map(BPFState *state);
 struct bpf_map *bpf_state__get_ip_cfg_map(BPFState *state);
+struct bpf_map *bpf_state__get_vlan_cfg_map(BPFState *state);
 void bpf_state__clear_device_map(BPFState *state);
 void bpf_state__clear_ip_cfg_map(BPFState *state);
+void bpf_state__clear_vlan_cfg_map(BPFState *state);
 void bpf_state__remove_stale_devices(BPFState *state, List *devices);
 void bpf_state__remove_stale_ip_cfgs(BPFState *state, List *ip_cfgs);
 unsigned bpf_state__get_num_devices(BPFState *state);

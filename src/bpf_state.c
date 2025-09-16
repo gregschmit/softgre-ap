@@ -90,7 +90,7 @@ BPFState *bpf_state__open(char *bpf_path, unsigned num_ifs, char **ifs) {
     }
 
     // Find the Device map and clear it.
-    struct bpf_map *device_map = bpf_object__find_map_by_name(state->obj, "device_map");
+    struct bpf_map *device_map = bpf_state__get_device_map(state);
     if (!device_map) {
         log_error("Failed to find Device BPF map.");
         bpf_state__close(state);
@@ -99,13 +99,22 @@ BPFState *bpf_state__open(char *bpf_path, unsigned num_ifs, char **ifs) {
     bpf_state__clear_device_map(state);
 
     // Find the IP Config map and clear it.
-    struct bpf_map *ip_cfg_map = bpf_object__find_map_by_name(state->obj, "ip_cfg_map");
+    struct bpf_map *ip_cfg_map = bpf_state__get_ip_cfg_map(state);
     if (!ip_cfg_map) {
         log_error("Failed to find IP Config BPF map.");
         bpf_state__close(state);
         return NULL;
     }
     bpf_state__clear_ip_cfg_map(state);
+
+    // Find the VLAN Config map and clear it.
+    struct bpf_map *vlan_cfg_map = bpf_state__get_vlan_cfg_map(state);
+    if (!vlan_cfg_map) {
+        log_error("Failed to find VLAN Config BPF map.");
+        bpf_state__close(state);
+        return NULL;
+    }
+    bpf_state__clear_vlan_cfg_map(state);
 
     // Attach the BPF program to each interface.
     int successful_attachments = 0;
@@ -145,6 +154,11 @@ struct bpf_map *bpf_state__get_device_map(BPFState *state) {
 struct bpf_map *bpf_state__get_ip_cfg_map(BPFState *state) {
     if (!state || !state->obj) { return NULL; }
     return bpf_object__find_map_by_name(state->obj, "ip_cfg_map");
+}
+
+struct bpf_map *bpf_state__get_vlan_cfg_map(BPFState *state) {
+    if (!state || !state->obj) { return NULL; }
+    return bpf_object__find_map_by_name(state->obj, "vlan_cfg_map");
 }
 
 void bpf_state__clear_device_map(BPFState *state) {
@@ -220,6 +234,44 @@ void bpf_state__clear_ip_cfg_map(BPFState *state) {
 
     if (res != -ENOENT) {
         log_error("Failed to get next key from IP Config map.");
+    }
+}
+
+void bpf_state__clear_vlan_cfg_map(BPFState *state) {
+    struct bpf_map *vlan_cfg_map = bpf_state__get_vlan_cfg_map(state);
+    if (!vlan_cfg_map) { return; }
+
+    uint16_t key, next_key;
+
+    // Get the first key.
+    int res = bpf_map__get_next_key(vlan_cfg_map, NULL, &key, sizeof(key));
+    if (res) {
+        if (res != -ENOENT) {
+            log_error("Failed to get first key from VLAN Config map (%d).", res);
+        }
+
+        return;
+    }
+
+    while (res == 0) {
+        // Get the next key before deleting the current key.
+        res = bpf_map__get_next_key(vlan_cfg_map, &key, &next_key, sizeof(next_key));
+
+        // Delete the current key.
+        if (bpf_map__delete_elem(vlan_cfg_map, &key, sizeof(key), BPF_ANY) != 0) {
+            log_errno("bpf_map__delete_elem");
+            log_error("Failed to delete key from VLAN Config map.");
+            return;
+        }
+
+        // Copy next key to key for the next iteration.
+        if (res == 0) {
+            key = next_key;
+        }
+    }
+
+    if (res != -ENOENT) {
+        log_error("Failed to get next key from VLAN Config map.");
     }
 }
 
