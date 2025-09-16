@@ -86,6 +86,7 @@ static inline __sum16 csum_fold(__wsum csum) {
 
 SEC("tc/ingress")
 int bpf_softgre_ap(struct __sk_buff *skb) {
+    long r;  // Return type of BPF helper functions.
     void *data_end = (void *)(long)skb->data_end;
     void *data = (void *)(long)skb->data;
 
@@ -121,8 +122,8 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         // Annotate the Device's ifindex if not already set.
         if (!src_dev->ifindex) {
             src_dev->ifindex = skb->ifindex;
-            if (bpf_map_update_elem(&device_map, &outer_eth->h_source, src_dev, BPF_EXIST)) {
-                BPF_DBG("Failed to update device ifindex.");
+            if ((r = bpf_map_update_elem(&device_map, &outer_eth->h_source, src_dev, BPF_EXIST))) {
+                BPF_DBG("Failed to update device ifindex (%ld).", r);
                 return TC_ACT_SHOT;
             }
 
@@ -146,8 +147,10 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
                 }
 
                 if (inserted) {
-                    if (bpf_map_update_elem(&vlan_cfg_map, &src_dev->vlan, vlan_cfg, BPF_EXIST)) {
-                        BPF_DBG("Failed to update VLAN config.");
+                    if ((r = bpf_map_update_elem(
+                        &vlan_cfg_map, &src_dev->vlan, vlan_cfg, BPF_EXIST
+                    ))) {
+                        BPF_DBG("Failed to update VLAN config (%ld).", r);
                         return TC_ACT_SHOT;
                     }
                 }
@@ -160,8 +163,10 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
                 // Create a new VLAN cfg.
                 VLANCfg new_cfg = {.vlan = src_dev->vlan, .ifindexes = {0}};
                 new_cfg.ifindexes[0] = src_dev->ifindex;
-                if (bpf_map_update_elem(&vlan_cfg_map, &src_dev->vlan, &new_cfg, BPF_NOEXIST)) {
-                    BPF_DBG("Failed to create VLAN config.");
+                if ((r = bpf_map_update_elem(
+                    &vlan_cfg_map, &src_dev->vlan, &new_cfg, BPF_NOEXIST
+                ))) {
+                    BPF_DBG("Failed to create VLAN config (%ld).", r);
                     return TC_ACT_SHOT;
                 }
             }
@@ -175,8 +180,8 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         }
 
         // Ensure any existing VLAN tags are removed.
-        if (bpf_skb_vlan_pop(skb)) {
-            BPF_DBG("Failed to remove existing VLAN tag.");
+        if ((r = bpf_skb_vlan_pop(skb))) {
+            BPF_DBG("Failed to remove existing VLAN tag (%ld).", r);
             return TC_ACT_SHOT;
         }
 
@@ -199,9 +204,8 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         if (src_dev->vlan) {
             expand_size += sizeof(*inner_vlan);
         }
-        long res = bpf_skb_adjust_room(skb, expand_size, BPF_ADJ_ROOM_MAC, 0);
-        if (res) {
-            BPF_DBG("Failed to expand frame (`bpf_skb_adjust_room` %d).", res);
+        if ((r = bpf_skb_adjust_room(skb, expand_size, BPF_ADJ_ROOM_MAC, 0))) {
+            BPF_DBG("Failed to expand frame (%ld).", r);
             return TC_ACT_SHOT;
         }
 
@@ -237,20 +241,17 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
             return TC_ACT_SHOT;
         }
 
-        // Get location of inner VLAN header, if needed.
+        // Move pre-existing inner Ethernet header into proper location after the outer headers.
+        __builtin_memcpy(inner_eth, outer_eth, sizeof(*outer_eth));
+
+        // Write inner VLAN header, if needed.
         if (src_dev->vlan) {
             inner_vlan = (struct vlan_hdr *)(inner_eth + 1);
             if ((void *)(inner_vlan + 1) > data_end) {
                 BPF_DBG("Inner VLAN header out of bounds after expand.");
                 return TC_ACT_SHOT;
             }
-        }
 
-        // Move pre-existing inner Ethernet header into proper location after the outer headers.
-        __builtin_memcpy(inner_eth, outer_eth, sizeof(*outer_eth));
-
-        // Write inner VLAN header, if needed.
-        if (src_dev->vlan) {
             inner_vlan->h_vlan_TCI = bpf_htons(src_dev->vlan);
             inner_vlan->h_vlan_encapsulated_proto = inner_eth->h_proto;
             inner_eth->h_proto = bpf_htons(ETH_P_8021Q);
@@ -326,11 +327,29 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
     if (dst_dev || bcast) {
         BPF_DBGV("Decapsulating.");
 
-        // Shrink packet to remove outer Ethernet/IP/GRE headers.
-        unsigned short shrink_size = sizeof(*outer_eth) + (ip->ihl * 4) + sizeof(*gre);
-        int res = bpf_skb_adjust_room(skb, -shrink_size, BPF_ADJ_ROOM_MAC, 0);
-        if (res) {
-            BPF_DBG("Failed to shrink frame (`bpf_skb_adjust_room` %d).", res);
+        // Save inner Ethernet/VLAN headers before shrinking.
+        struct ethhdr saved_inner_eth;
+        struct vlan_hdr saved_inner_vlan;
+        uint16_t vlan_id = 0;
+        __builtin_memcpy(&saved_inner_eth, inner_eth, sizeof(saved_inner_eth));
+        if (inner_eth->h_proto == bpf_htons(ETH_P_8021Q)) {
+            struct vlan_hdr *inner_vlan = (void *)(inner_eth + 1);
+            if ((void *)(inner_vlan + 1) > data_end) {
+                BPF_DBG("Inner VLAN header out of bounds.");
+                return TC_ACT_SHOT;
+            }
+            __builtin_memcpy(&saved_inner_vlan, inner_vlan, sizeof(saved_inner_vlan));
+            vlan_id = bpf_ntohs(inner_vlan->h_vlan_TCI) & VLAN_VID_MASK;
+        }
+
+        // Shrink packet to remove outer Ethernet/IP/GRE headers and remove any VLAN metadata.
+        size_t shrink_size = sizeof(*outer_eth) + (ip->ihl * 4) + sizeof(*gre);
+        if ((r = bpf_skb_adjust_room(skb, -shrink_size, BPF_ADJ_ROOM_MAC, 0))) {
+            BPF_DBG("Failed to shrink frame (%ld).", r);
+            return TC_ACT_SHOT;
+        }
+        if ((r = bpf_skb_vlan_pop(skb))) {
+            BPF_DBG("Failed to remove VLAN metadata (%ld).", r);
             return TC_ACT_SHOT;
         }
 
@@ -338,29 +357,35 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         data = (void *)(long)skb->data;
         data_end = (void *)(long)skb->data_end;
 
-        // "Inner" Ethernet header is now at the start of the packet.
+        // Update data pointers after potential VLAN pop.
+        data = (void *)(long)skb->data;
+        data_end = (void *)(long)skb->data_end;
+
+        // Copy saved inner Ethernet header to the start of the packet.
         inner_eth = data;
         if ((void *)(inner_eth + 1) > data_end) {
-            BPF_DBG("Inner Ethernet header out of bounds after shrink.");
+            BPF_DBG("Ethernet header out of bounds after shrink.");
             return TC_ACT_SHOT;
+        }
+        __builtin_memcpy(inner_eth, &saved_inner_eth, sizeof(saved_inner_eth));
+
+        // Copy saved inner VLAN header if present.
+        if (vlan_id) {
+            struct vlan_hdr *inner_vlan = (void *)(inner_eth + 1);
+            if ((void *)(inner_vlan + 1) > data_end) {
+                BPF_DBG("VLAN header out of bounds after shrink.");
+                return TC_ACT_SHOT;
+            }
+            __builtin_memcpy(inner_vlan, &saved_inner_vlan, sizeof(saved_inner_vlan));
         }
 
         if (bcast) {
-            // Extract VLAN ID from inner Ethernet header, if present.
-            uint16_t vlan_id = 0;
-            if (inner_eth->h_proto == bpf_htons(ETH_P_8021Q)) {
-                struct vlan_hdr *vlan = (void *)(inner_eth + 1);
-                if ((void *)(vlan + 1) > data_end) {
-                    BPF_DBG("VLAN header out of bounds.");
-                    return TC_ACT_SHOT;
-                }
-                vlan_id = bpf_ntohs(vlan->h_vlan_TCI) & VLAN_VID_MASK;
-            }
-
             // Redirect to all interfaces hosting this VLAN, if any.
+            BPF_DBGV("Decap broadcasting on VLAN %d.", vlan_id);
             VLANCfg *vlan_cfg = bpf_map_lookup_elem(&vlan_cfg_map, &vlan_id);
             if (vlan_cfg) {
                 for (unsigned i = 0; i < MAX_INTERFACES && vlan_cfg->ifindexes[i]; i++) {
+                    BPF_DBGV("Decap broadcasting to ifindex %d.", vlan_cfg->ifindexes[i]);
                     bpf_clone_redirect(skb, vlan_cfg->ifindexes[i], 0);
                 }
             }
@@ -375,6 +400,7 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
             }
 
             // Redirect to the device's ifindex.
+            BPF_DBGV("Decap redirecting on VLAN %d to ifindex %d.", vlan_id, dst_dev->ifindex);
             return bpf_redirect(dst_dev->ifindex, 0);
         }
     }
