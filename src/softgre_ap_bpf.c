@@ -91,7 +91,7 @@ static inline __sum16 csum_fold(__wsum csum) {
 }
 
 // Validate header does not exceed packet bounds.
-static inline bool validate_header_bounds(void *header, void *data_end, size_t header_size) {
+static inline bool validate_header_bounds(void *header, void *data_end, int32_t header_size) {
     // TODO: Remove cast?
     return (void *)header + header_size <= data_end;
 }
@@ -164,13 +164,11 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
             for (unsigned i = 0; i < MAX_INTERFACES; i++) {
                 if (vlan_cfg->ifindexes[i] == src_dev->ifindex) {
                     // Already present, so nothing to do.
-                    BPF_DBGV("VLANCFG: Found ifindex %d to %d.", src_dev->ifindex, src_dev->vlan);
                     found = true;
                     break;
                 } else if (vlan_cfg->ifindexes[i] == 0) {
                     // Found an empty slot, so add it here.
                     vlan_cfg->ifindexes[i] = src_dev->ifindex;
-                    BPF_DBGV("VLANCFG: Insert ifindex %d to %d.", src_dev->ifindex, src_dev->vlan);
                     inserted = true;
                     break;
                 }
@@ -204,14 +202,6 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
             return TC_ACT_SHOT;
         }
 
-        // Ensure any existing VLAN tag metadata is removed.
-        if ((r = bpf_skb_vlan_pop(skb))) {
-            BPF_DBG("DROP; Failed to remove existing VLAN tag (%ld).", r);
-            return TC_ACT_SHOT;
-        }
-
-        update_data_pointers(skb, &data, &data_end);
-
         // Get outer Ethernet header.
         outer_eth = data;
         if (!validate_header_bounds(outer_eth, data_end, sizeof(*outer_eth))) {
@@ -225,16 +215,26 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         struct gre_base_hdr *gre = NULL;
         struct ethhdr *inner_eth = NULL;
         struct vlan_hdr *inner_vlan = NULL;
-        size_t expand_size = sizeof(*outer_eth) + sizeof(*ip) + sizeof(*gre);
+        uint32_t expand_size = sizeof(*outer_eth) + sizeof(*ip) + sizeof(*gre);
         if (src_dev->vlan) {
             expand_size += sizeof(*inner_vlan);
         }
-        if ((r = bpf_skb_adjust_room(skb, expand_size, BPF_ADJ_ROOM_MAC, 0))) {
+        // Useful when debugging when expanding fails.
+        // BPF_DBGV("About to expand frame by %ld bytes.", expand_size);
+        // BPF_DBGV(
+        //     "Packet pkt_type: %d protocol: 0x%04x vlan_present: %d",
+        //     skb->pkt_type,
+        //     bpf_ntohs(skb->protocol),
+        //     skb->vlan_present
+        // );
+        if ((r = bpf_skb_change_head(skb, expand_size, 0))) {
             BPF_DBG("DROP; Failed to expand frame (%ld).", r);
             return TC_ACT_SHOT;
         }
-
-        // Update data pointers after expanding frame.
+        if ((r = bpf_skb_vlan_pop(skb))) {
+            BPF_DBG("DROP; Failed to remove existing VLAN tag (%ld).", r);
+            return TC_ACT_SHOT;
+        }
         update_data_pointers(skb, &data, &data_end);
 
         // Get location of outer Ethernet header.
@@ -265,9 +265,6 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
             return TC_ACT_SHOT;
         }
 
-        // Move pre-existing inner Ethernet header into proper location after the outer headers.
-        __builtin_memcpy(inner_eth, outer_eth, sizeof(*outer_eth));
-
         // Write inner VLAN header, if needed.
         if (src_dev->vlan) {
             inner_vlan = (struct vlan_hdr *)(inner_eth + 1);
@@ -276,6 +273,18 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
                 return TC_ACT_SHOT;
             }
 
+            // First, after expand, the inner Ethernet header is actually positioned after the GRE
+            // header plus the size of a VLAN header. We need to move it back to the proper location
+            // so we have room to write the VLAN header.
+            // NOTE: We have to use memmove here instead of memcpy because the regions overlap.
+            struct ethhdr *true_inner_eth = (void *)(gre + 1) + sizeof(*inner_vlan);
+            if (!validate_header_bounds(true_inner_eth, data_end, sizeof(*true_inner_eth))) {
+                BPF_DBG("DROP; True inner Ethernet header out of bounds after expand.");
+                return TC_ACT_SHOT;
+            }
+            __builtin_memmove(inner_eth, true_inner_eth, sizeof(*inner_eth));
+
+            // Now we can write the inner VLAN header, and update the inner Ethernet header's proto.
             inner_vlan->h_vlan_TCI = bpf_htons(src_dev->vlan);
             inner_vlan->h_vlan_encapsulated_proto = inner_eth->h_proto;
             inner_eth->h_proto = bpf_htons(ETH_P_8021Q);
@@ -366,7 +375,7 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
         }
 
         // Shrink packet to remove outer Ethernet/IP/GRE headers and remove any VLAN metadata.
-        size_t shrink_size = sizeof(*outer_eth) + (ip->ihl * 4) + sizeof(*gre);
+        int32_t shrink_size = sizeof(*outer_eth) + (ip->ihl * 4) + sizeof(*gre);
         if ((r = bpf_skb_adjust_room(skb, -shrink_size, BPF_ADJ_ROOM_MAC, 0))) {
             BPF_DBG("DROP; Failed to shrink frame (%ld).", r);
             return TC_ACT_SHOT;
@@ -375,7 +384,6 @@ int bpf_softgre_ap(struct __sk_buff *skb) {
             BPF_DBG("DROP; Failed to remove VLAN metadata (%ld).", r);
             return TC_ACT_SHOT;
         }
-
         update_data_pointers(skb, &data, &data_end);
 
         // Copy saved inner Ethernet header to the start of the packet.
