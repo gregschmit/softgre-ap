@@ -21,7 +21,7 @@ void bpf_state__close(BPFState *state) {
     }
 
     if (state->links) {
-        for (int i = 0; i < state->num_ifs; i++) {
+        for (int i = 0; i < state->num_ifs * 2; i++) {
             if (state->links[i]) {
                 int res = bpf_link__destroy(state->links[i]);
                 if (res) {
@@ -56,8 +56,8 @@ BPFState *bpf_state__open(char *bpf_path, unsigned num_ifs, char **ifs) {
         return NULL;
     }
 
-    // Allocate memory for links.
-    state->links = calloc(num_ifs, sizeof(*state->links));
+    // Allocate memory for links (number of ifs * number of programs).
+    state->links = calloc(num_ifs * 2, sizeof(*state->links));
     if (!state->links) {
         log_error("Failed to allocate memory for links.");
         bpf_state__close(state);
@@ -81,10 +81,16 @@ BPFState *bpf_state__open(char *bpf_path, unsigned num_ifs, char **ifs) {
         return NULL;
     }
 
-    // Find the BPF program.
-    struct bpf_program *prog = bpf_object__find_program_by_name(state->obj, "bpf_softgre_ap");
-    if (!prog) {
-        log_error("Failed to find BPF program.");
+    // Find the BPF programs.
+    struct bpf_program *prog_xdp = bpf_object__find_program_by_name(state->obj, "dtuninit_xdp");
+    if (!prog_xdp) {
+        log_error("Failed to find dtuninit_xdp.");
+        bpf_state__close(state);
+        return NULL;
+    }
+    struct bpf_program *prog_tci = bpf_object__find_program_by_name(state->obj, "dtuninit_tci");
+    if (!prog_tci) {
+        log_error("Failed to find dtuninit_tci.");
         bpf_state__close(state);
         return NULL;
     }
@@ -116,9 +122,9 @@ BPFState *bpf_state__open(char *bpf_path, unsigned num_ifs, char **ifs) {
     }
     bpf_state__clear_vlan_cfg_map(state);
 
-    // Attach the BPF program to each interface.
-    int successful_attachments = 0;
-    for (int i = 0; i < num_ifs; i++) {
+    // Attach the BPF programs to each interface.
+    unsigned successful_attachments = 0;
+    for (unsigned i = 0; i < num_ifs; i++) {
         state->ifindexes[i] = if_nametoindex(ifs[i]);
         if (state->ifindexes[i] == 0) {
             log_errno("if_nametoindex");
@@ -126,13 +132,25 @@ BPFState *bpf_state__open(char *bpf_path, unsigned num_ifs, char **ifs) {
             continue;
         }
 
-        state->links[i] = bpf_program__attach_tcx(prog, state->ifindexes[i], NULL);
-        if (state->links[i]) {
-            log_info("Attached to interface %s (ifindex %d).", ifs[i], state->ifindexes[i]);
+        unsigned xdp_i = i;
+        state->links[xdp_i] = bpf_program__attach_xdp(prog_xdp, state->ifindexes[i]);
+        if (state->links[xdp_i]) {
+            log_info("Attached XDP to interface %s (ifindex %d).", ifs[i], state->ifindexes[i]);
+            successful_attachments++;
+        } else {
+            log_errno("bpf_program__attach_xdp");
+            log_error("Failed to attach XDP to interface %s.", ifs[i]);
+            continue;
+        }
+
+        unsigned tci_i = num_ifs + i;
+        state->links[tci_i] = bpf_program__attach_tcx(prog_tci, state->ifindexes[i], NULL);
+        if (state->links[tci_i]) {
+            log_info("Attached TCI to interface %s (ifindex %d).", ifs[i], state->ifindexes[i]);
             successful_attachments++;
         } else {
             log_errno("bpf_program__attach_tcx");
-            log_error("Failed to attach BPF program to interface %s.", ifs[i]);
+            log_error("Failed to attach TCI to interface %s.", ifs[i]);
             continue;
         }
     }

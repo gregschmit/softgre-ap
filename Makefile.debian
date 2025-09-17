@@ -37,17 +37,17 @@ tidy:
 .PHONY: docker_build
 docker_build:
 	@echo "Building Docker image..."
-	docker build -t softgre-ap .
+	docker build -t dtuninit .
 
 .PHONY: build
 build: docker_build
 	@echo "Building in Docker container..."
-	docker run -it --rm -v .:/app softgre-ap make -B
+	docker run -it --rm -v .:/app dtuninit make -B
 
 .PHONY: build_static
 build_static: docker_build
 	@echo "Building static in Docker container..."
-	docker run -it --rm -v .:/app softgre-ap make -B static
+	docker run -it --rm -v .:/app dtuninit make -B static
 
 # TODO: Get clang-tidy working.
 # .PHONY: tidy
