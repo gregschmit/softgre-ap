@@ -341,21 +341,37 @@ static inline int xdp_encapsulate(struct xdp_md *ctx, Device *device) {
     return XDP_PASS;
 }
 
-static inline int xdp_decapsulate(struct xdp_md *ctx, uint8_t ihl, Device *device, uint16_t vlan) {
+static inline int xdp_decapsulate(
+    struct xdp_md *ctx, uint8_t ihl, Device *device, uint16_t vlan, struct ethhdr *untagged_eth
+) {
     XDP_DBGV("Decapsulating.");
     void *data = (void *)(long)ctx->data;
     void *data_end = (void *)(long)ctx->data_end;
     long r;  // Return code for BPF helpers.
 
-    // Shrink packet to remove outer Ethernet/IP/GRE headers.
+    // Shrink packet to remove outer Ethernet/IP/GRE and inner VLAN headers.
     int32_t shrink_size = sizeof(struct ethhdr) + (ihl * 4) + sizeof(struct gre_base_hdr);
+    if (vlan) {
+        shrink_size += sizeof(struct vlan_hdr);
+    }
     if ((r = bpf_xdp_adjust_head(ctx, shrink_size))) {
         XDP_DBG("DROP; Failed to shrink frame (%ld).", r);
         return XDP_DROP;
     }
 
+    // Write untagged Ethernet header, if needed.
+    if (vlan) {
+        xdp_update_data_ptrs(ctx, &data, &data_end);
+        struct ethhdr *eth = data;
+        if (!validate_header_bounds(eth, data_end, sizeof(*eth))) {
+            XDP_DBG("DROP; Ethernet header out of bounds after shrink.");
+            return XDP_DROP;
+        }
+        *eth = *untagged_eth;
+    }
+
     // Annotate that we have decapsulated.
-    if ((r = bpf_xdp_adjust_meta(ctx, sizeof(Metadata)))) {
+    if ((r = bpf_xdp_adjust_meta(ctx, -(int)sizeof(Metadata)))) {
         XDP_DBG("DROP; Failed to adjust meta (%ld).", r);
         return XDP_DROP;
     }
@@ -424,16 +440,18 @@ int dtuninit_xdp(struct xdp_md *ctx) {
 
     // Get VLAN, if present.
     uint16_t vlan_id = 0;
+    struct ethhdr untagged_eth = *inner_eth;
     if (inner_eth->h_proto == bpf_htons(ETH_P_8021Q)) {
         struct vlan_hdr *vlan = (struct vlan_hdr *)(inner_eth + 1);
         if (!validate_header_bounds(vlan, data_end, sizeof(*vlan))) { return XDP_PASS; }
         vlan_id = bpf_ntohs(vlan->h_vlan_TCI) & VLAN_VID_MASK;
+        untagged_eth.h_proto = vlan->h_vlan_encapsulated_proto;
     }
 
     bool bcast = mac_eq(inner_eth->h_dest, (const uint8_t[])ETH_BCAST_MAC);
     Device *dst_dev = bpf_map_lookup_elem(&device_map, &inner_eth->h_dest);
     if (bcast || dst_dev) {
-        return xdp_decapsulate(ctx, ip->ihl, dst_dev, vlan_id);
+        return xdp_decapsulate(ctx, ip->ihl, dst_dev, vlan_id, &untagged_eth);
     }
 
     return XDP_PASS;
@@ -452,6 +470,7 @@ int dtuninit_tci(struct __sk_buff *skb) {
     // ENCAPSULATION:
     // If the XDP program encapsulated, handle L2 data and redirect to ifindex.
     if (md->type == METADATA_ENCAP) {
+        TCX_DBGV("NEIGH; Encap to ifindex %d.", md->data.encap.ifindex);
         return bpf_redirect_neigh(md->data.encap.ifindex, NULL, 0, 0);
     }
 
@@ -461,9 +480,9 @@ int dtuninit_tci(struct __sk_buff *skb) {
         if (md->data.decap.ifindex) {
             // Unicast to specific interface.
             TCX_DBGV(
-                "REDIR; Decap redirecting on VLAN %d to ifindex %d.",
+                "REDIR; Decap on VLAN %d to ifindex %d.",
                 md->data.decap.vlan,
-                md->data.decap.ifindex,
+                md->data.decap.ifindex
             );
             return bpf_redirect(md->data.decap.ifindex, 0);
         } else {
@@ -475,8 +494,9 @@ int dtuninit_tci(struct __sk_buff *skb) {
             }
 
             // Broadcast to all interfaces in the VLAN config.
+            TCX_DBGV("Decap broadcast on VLAN %d.", md->data.decap.vlan);
             for (unsigned i = 0; i < MAX_INTERFACES && vlan_cfg->ifindexes[i]; i++) {
-                TCX_DBGV("CLONE; Decap broadcasting to ifindex %d.", vlan_cfg->ifindexes[i]);
+                TCX_DBGV("CLONE; Decap to ifindex %d.", vlan_cfg->ifindexes[i]);
                 bpf_clone_redirect(skb, vlan_cfg->ifindexes[i], 0);
             }
 
