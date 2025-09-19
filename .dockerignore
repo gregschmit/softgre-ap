@@ -1,2 +1,2 @@
-softgre_apd
-softgre_ap_bpf.o
+./dtuninit
+./dtuninit_bpf.o

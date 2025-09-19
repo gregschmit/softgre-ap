@@ -1,8 +1,10 @@
 /*
- * SoftGRE Access Point Daemon
+ * Dynamic Tunnel Initiator Userspace Program
  *
- * This daemon loads/unload the BPF program and monitors the mapping file to keep the BPF maps
- * updated.
+ * This program's primary subcommand `start` loads/unload the BPF program and monitors the clients
+ * file to keep the BPF maps updated. It also provides subcommands for adding/removing clients, to
+ * avoid requiring users of this software from having to manually parse and write to the clients
+ * file.
  */
 
 #include <errno.h>
@@ -17,33 +19,45 @@
 #include <string.h>
 #include <unistd.h>
 
-#include <netinet/in.h>
 #include <arpa/inet.h>
-#include <net/if.h>
-
-#include <sys/socket.h>
 #include <ifaddrs.h>
-#include <linux/bpf.h>
-#include <linux/if_packet.h>
+#include <net/if.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
 
+#include <linux/bpf.h>
+
+#include "../shared.h"
 #include "list.h"
 #include "log.h"
-#include "shared.h"
 #include "watch.h"
 #include "bpf_state.h"
 
-#define DEFAULT_MAP "/var/run/softgre_ap_map.conf"
-#define DEFAULT_BPF "softgre_ap_bpf.o"
+#define VERSION_S "dtuninit " VERSION
+#define USAGE_S \
+    VERSION_S "\n\n" \
+    "Usage: dtuninit [-cdfixVh]\n" \
+    "Options:\n" \
+    "  -c <FILE>  Clients file (default: " DEFAULT_CLIENTS_PATH ").\n" \
+    "  -d         Enable debug logging.\n" \
+    "  -f         Foreground mode (no daemonization).\n" \
+    "  -i <IF>    Bind the BPF program to this interface.\n" \
+    "  -x <FILE>  BPF programs file (default: neighbor " DEFAULT_BPF_FN " or PATH\n" \
+    "             " DEFAULT_BPF_FN ").\n" \
+    "  -V         Show version.\n" \
+    "  -h -?      Show usage.\n"
 
-// Must fit the largest map entry; e.g. `FF:FF:FF:FF:FF:FF 255.255.255.255 4095\0`.
-#define MAX_LINE_SIZE 39
+#define DEFAULT_CLIENTS_PATH "/var/run/dtuninit_clients"
+#define DEFAULT_BPF_FN "dtuninit_bpf.o"
 
 volatile bool INTERRUPT = false;
+bool FOREGROUND = false;
 
-// Static storage to hold all interface names, if needed.
-#define ALL_IFS_MAX_STRLEN 256
-static char ALL_IFS[MAX_INTERFACES][ALL_IFS_MAX_STRLEN] = {0};
-static char *ALL_IFS_PTRS[MAX_INTERFACES] = {0};
+// Static storage to hold interface data.
+#define IFS_MAX_STRLEN 256
+static unsigned IFS_COUNT = 0;
+static char IFS[MAX_INTERFACES][IFS_MAX_STRLEN] = {0};
+static char *IFS_PTRS[MAX_INTERFACES] = {0};
 
 void interrupt_handler(int _signum) {
     INTERRUPT = true;
@@ -62,7 +76,7 @@ bool populate_ip_cfg_src_ip(IPCfg *ip_cfg) {
     memset(&dst_addr, 0, sizeof(dst_addr));
     dst_addr.sin_family = AF_INET;
     dst_addr.sin_port = htons(53);  // DNS port, but any port works.
-    dst_addr.sin_addr = ip_cfg->gre_ip;
+    dst_addr.sin_addr = ip_cfg->peer_ip;
 
     // Connect to destination (this doesn't actually send packets for UDP).
     if (connect(sockfd, (struct sockaddr*)&dst_addr, sizeof(dst_addr)) < 0) {
@@ -127,11 +141,11 @@ bool populate_ip_cfg_ifindex(IPCfg *ip_cfg) {
 
 // Ensure `src_ip` is set to 0 if any of the population steps fail.
 bool populate_ip_cfg(IPCfg *ip_cfg) {
-    if (!ip_cfg || !ip_cfg->gre_ip.s_addr) { return false; }
+    if (!ip_cfg || !ip_cfg->peer_ip.s_addr) { return false; }
 
     // Determine src IP for this GRE IP.
     if (!populate_ip_cfg_src_ip(ip_cfg)) {
-        log_error("Failed to determine src IP for GRE IP: %s", inet_ntoa(ip_cfg->gre_ip));
+        log_error("Failed to determine src IP for GRE IP: %s", inet_ntoa(ip_cfg->peer_ip));
         ip_cfg->src_ip.s_addr = 0;
         return false;
     }
@@ -146,8 +160,19 @@ bool populate_ip_cfg(IPCfg *ip_cfg) {
     return true;
 }
 
-void parse_map_file(const char *path, List *devices, List *ip_cfgs, uint8_t cycle) {
-    if (!devices || !ip_cfgs) { return; }
+bool split(const char *s, char delim, char *left, char *right) {
+    char *d = strchr(s, delim);
+    if (!d) { return false; }
+    if (d == s) { return false; }
+    if (*(d + 1) == '\0') { return false; }
+    *d = '\0';
+    left = (char *)s;
+    right = (char *)(d + 1);
+    return true;
+}
+
+void parse_clients_file(const char *path, List *clients, List *ip_cfgs, uint8_t cycle) {
+    if (!clients || !ip_cfgs) { return; }
 
     FILE *fp = fopen(path, "r");
     if (!fp) {
@@ -162,70 +187,119 @@ void parse_map_file(const char *path, List *devices, List *ip_cfgs, uint8_t cycl
         return;
     }
 
-    // Read file line by line into the device list.
-    char linebuf[MAX_LINE_SIZE] = "";
+    // Read file line by line into the client list.
+    char linebuf[256] = "";
     while (fgets(linebuf, sizeof(linebuf), fp)) {
         // Ignore comments.
         if (linebuf[0] == '#') { continue; }
 
         // Parse the line, logging but otherwise disregarding any errors.
-        Device device = {.cycle = cycle};
-        char gre_ip[16] = "";
-        int res = sscanf(
+        Client client = {.cycle = cycle};
+        char proto_subproto[16] = "";
+        char args[128] = "";
+        int n = sscanf(
             linebuf,
-            "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx %15s %hu",
-            &device.mac[0],
-            &device.mac[1],
-            &device.mac[2],
-            &device.mac[3],
-            &device.mac[4],
-            &device.mac[5],
-            gre_ip,
-            &device.vlan
+            "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx %15s %127[^\n]",
+            &client.mac[0],
+            &client.mac[1],
+            &client.mac[2],
+            &client.mac[3],
+            &client.mac[4],
+            &client.mac[5],
+            proto_subproto,
+            args
         );
 
-        if (res != 8) {
+        if (n != 8) {
             log_error("Failed to parse line: `%s`", linebuf);
             continue;
         }
 
-        if (!inet_pton(AF_INET, gre_ip, &device.gre_ip)) {
-            log_error("Failed to parse GRE IP: `%s`", gre_ip);
+        // Parse proto/subproto.
+        char *proto = NULL, *subproto = NULL;
+        if (!split(proto_subproto, '/', proto, subproto)) {
+            log_error("Failed to parse protocol/subprotocol: `%s`", proto_subproto);
             continue;
         }
 
+        if (!strcmp(proto, "gre")) {
+            log_error("Unsupported protocol: `%s`", proto);
+            continue;
+        }
+        client.tun_config.proto = TUN_PROTO_GRE;
+
+        if (!strcmp(subproto, "v0")) {
+            client.tun_config.subproto.gre = TUN_GRE_SUBPROTO_V0;
+        } else {
+            log_error("Unsupported GRE subprotocol: `%s`", subproto);
+            continue;
+        }
+
+        char *peer_ip = strtok(args, " ");
+        if (!peer_ip) {
+            log_error("Missing Peer IP in line: `%s`", linebuf);
+            continue;
+        }
+
+        if (!inet_pton(AF_INET, peer_ip, &client.peer_ip)) {
+            log_error("Failed to parse Peer IP: `%s`", peer_ip);
+            continue;
+        }
+
+        while (true) {
+            // Get next arg.
+            char *arg = strtok(NULL, " ");
+            if (!arg) { break; }
+
+            // Parse into key/value.
+            char *key = NULL, *value = NULL;
+            if (!split(arg, '=', key, value)) { break; }
+
+            // For now, only support vlan key.
+            if (!strcmp(key, "vlan")) {
+                unsigned long vlan = strtoul(value, NULL, 10);
+                if (!vlan || vlan > 4094) {
+                    log_error("Invalid VLAN: `%s`", value);
+                    continue;
+                }
+                client.vlan = (uint16_t)vlan;
+            } else {
+                log_error("Unsupported client argument: `%s`", key);
+            }
+        }
+
         // See if we already have an IP Config.
-        IPCfg *ip_cfg = list__find(ip_cfgs, &device.gre_ip);
+        IPCfg *ip_cfg = list__find(ip_cfgs, &client.peer_ip);
         if (ip_cfg) {
             // If the config is not valid, then we previously failed to populate it, so skip this
-            // device.
+            // client.
             if (!ip_cfg__is_valid(ip_cfg)) {
                 continue;
             }
         } else {
             // We haven't seen this GRE IP before, so populate a new IP config and add it to the
-            // list. If we fail to populate it fully, then skip this device. But add the IP config
-            // regardless so we don't try again for subsequent devices with the same GRE IP.
-            IPCfg ip_cfg = {.gre_ip = device.gre_ip, .cycle = cycle};
+            // list. If we fail to populate it fully, then skip this client. But add the IP config
+            // regardless so we don't try again for subsequent clients with the same GRE IP.
+            IPCfg ip_cfg = {.peer_ip = client.peer_ip, .cycle = cycle};
             if (!populate_ip_cfg(&ip_cfg)) {
-                log_error("Failed to populate IP config for IP: %s", gre_ip);
+                log_error("Failed to populate IP config for IP: %s", peer_ip);
                 continue;
             }
 
             if (!list__add(ip_cfgs, &ip_cfg)) {
-                log_error("Failed to add IP config for IP: %s", gre_ip);
+                log_error("Failed to add IP config for IP: %s", peer_ip);
                 continue;
             }
         }
 
-        if (!list__add(devices, &device)) {
-            log_error("Failed to add device for MAC: %02x:%02x:%02x:%02x:%02x:%02x",
-                device.mac[0],
-                device.mac[1],
-                device.mac[2],
-                device.mac[3],
-                device.mac[4],
-                device.mac[5]
+        if (!list__add(clients, &client)) {
+            log_error("Failed to add client for MAC: %02x:%02x:%02x:%02x:%02x:%02x",
+                client.mac[0],
+                client.mac[1],
+                client.mac[2],
+                client.mac[3],
+                client.mac[4],
+                client.mac[5]
             );
         }
     }
@@ -233,7 +307,7 @@ void parse_map_file(const char *path, List *devices, List *ip_cfgs, uint8_t cycl
     fclose(fp);
 }
 
-void update_bpf_map(BPFState *state, const char *map_path) {
+void update_bpf_map(BPFState *state, const char *clients_path) {
     if (!state) {
         log_error("BPF state is NULL.");
         return;
@@ -245,9 +319,9 @@ void update_bpf_map(BPFState *state, const char *map_path) {
     }
 
     // Get the map objects.
-    struct bpf_map *device_map = bpf_state__get_device_map(state);
-    if (!device_map) {
-        log_error("Failed to get Device map.");
+    struct bpf_map *client_map = bpf_state__get_client_map(state);
+    if (!client_map) {
+        log_error("Failed to get Client map.");
         return;
     }
     struct bpf_map *ip_cfg_map = bpf_state__get_ip_cfg_map(state);
@@ -256,16 +330,16 @@ void update_bpf_map(BPFState *state, const char *map_path) {
         return;
     }
 
-    // Create device and IP config lists.
-    List *devices = list__new(
-        sizeof(Device), sizeof(uint8_t) * ETH_ALEN, (list__key_eq_t)device__key_eq
+    // Create client and IP config lists.
+    List *clients = list__new(
+        sizeof(Client), sizeof(uint8_t) * ETH_ALEN, (list__key_eq_t)client__key_eq
     );
-    if (!devices) { return; }
+    if (!clients) { return; }
     List *ip_cfgs = list__new(
         sizeof(IPCfg), sizeof(struct in_addr), (list__key_eq_t)ip_cfg__key_eq
     );
     if (!ip_cfgs) {
-        list__free(devices);
+        list__free(clients);
         return;
     }
 
@@ -273,14 +347,14 @@ void update_bpf_map(BPFState *state, const char *map_path) {
     state->cycle++;
 
     // Parse map file to populate the lists.
-    parse_map_file(map_path, devices, ip_cfgs, state->cycle);
-    if (!devices->length) {
-        list__free(devices);
+    parse_clients_file(clients_path, clients, ip_cfgs, state->cycle);
+    if (!clients->length) {
+        list__free(clients);
         list__free(ip_cfgs);
         return;
     }
     if (!ip_cfgs->length) {
-        list__free(devices);
+        list__free(clients);
         list__free(ip_cfgs);
         return;
     }
@@ -291,101 +365,58 @@ void update_bpf_map(BPFState *state, const char *map_path) {
 
         if (bpf_map__update_elem(
             ip_cfg_map,
-            &ip_cfg.gre_ip,
-            sizeof(ip_cfg.gre_ip),
+            &ip_cfg.peer_ip,
+            sizeof(ip_cfg.peer_ip),
             &ip_cfg,
             sizeof(ip_cfg),
             BPF_ANY
         )) {
-            log_error("Failed to update IP map for GRE IP: %s", inet_ntoa(ip_cfg.gre_ip));
+            log_error("Failed to update IP map for GRE IP: %s", inet_ntoa(ip_cfg.peer_ip));
             continue;
         }
     }
 
-    // Update the device map.
-    for (size_t i = 0; i < devices->length; i++) {
-        Device device = ((Device *)devices->items)[i];
+    // Update the client map.
+    for (size_t i = 0; i < clients->length; i++) {
+        Client client = ((Client *)clients->items)[i];
         if (bpf_map__update_elem(
-            device_map,
-            &device.mac,
-            sizeof(device.mac),
-            &device,
-            sizeof(device),
+            client_map,
+            &client.mac,
+            sizeof(client.mac),
+            &client,
+            sizeof(client),
             BPF_ANY
         )) {
-            log_error("Failed to update Device map for MAC: %02x:%02x:%02x:%02x:%02x:%02x",
-                device.mac[0],
-                device.mac[1],
-                device.mac[2],
-                device.mac[3],
-                device.mac[4],
-                device.mac[5]
+            log_error("Failed to update Client map for MAC: %02x:%02x:%02x:%02x:%02x:%02x",
+                client.mac[0],
+                client.mac[1],
+                client.mac[2],
+                client.mac[3],
+                client.mac[4],
+                client.mac[5]
             );
             continue;
         }
     }
 
     // Remove stale entries.
-    bpf_state__remove_stale_devices(state, devices);
+    bpf_state__remove_stale_clients(state, clients);
     bpf_state__remove_stale_ip_cfgs(state, ip_cfgs);
 
-    list__free(devices);
+    list__free(clients);
     list__free(ip_cfgs);
 }
 
-unsigned populate_all_ifs() {
-    struct ifaddrs *ifaddr;
-    if (getifaddrs(&ifaddr) == -1) {
-        log_errno("getifaddrs");
-        return 0;
-    }
-
-    unsigned count = 0;
-    for (struct ifaddrs *ifa = ifaddr; ifa != NULL; ifa = ifa->ifa_next) {
-        if (count >= MAX_INTERFACES) { break; }
-        if (ifa->ifa_addr == NULL) { continue; }
-
-        // Only consider L2 interfaces.
-        if (ifa->ifa_addr->sa_family != AF_PACKET) { continue; }
-
-        // Cast to sockaddr_ll to access hardware type.
-        struct sockaddr_ll *sll = (struct sockaddr_ll *)ifa->ifa_addr;
-
-        // Skip loopback and non-ethernet interfaces.
-        if (sll->sll_hatype != ARPHRD_ETHER) { continue; }
-
-        // Check if we already have this interface.
-        bool found = false;
-        for (unsigned i = 0; i < count; i++) {
-            if (strcmp(ALL_IFS[i], ifa->ifa_name) == 0) {
-                found = true;
-                break;
-            }
-        }
-        if (found) { continue; }
-
-        // Add the interface name to the list.
-        strncpy(ALL_IFS[count], ifa->ifa_name, ALL_IFS_MAX_STRLEN - 1);
-        ALL_IFS[count][ALL_IFS_MAX_STRLEN - 1] = '\0';
-        count++;
-    }
-
-    freeifaddrs(ifaddr);
-    return count;
-}
-
 int main(int argc, char *argv[]) {
-    int clear_existing = 0;
-    int foreground = 0;
     char bpf_path[PATH_MAX + 1] = "";
-    char map_path[PATH_MAX + 1] = DEFAULT_MAP;
+    char clients_path[PATH_MAX + 1] = DEFAULT_CLIENTS_PATH;
 
     // If this program was invoked with a path, then assume the BPF program is in the same
     // directory.
     char *last_slash = strrchr(argv[0], '/');
     if (last_slash != NULL) {
         int len = last_slash - argv[0];
-        snprintf(bpf_path, sizeof(bpf_path), "%.*s/" DEFAULT_BPF, len, argv[0]);
+        snprintf(bpf_path, sizeof(bpf_path), "%.*s/" DEFAULT_BPF_FN, len, argv[0]);
 
         // Check if that file DOESN'T exist, and if so, clear the `bpf_path`.
         FILE *fp = fopen(bpf_path, "r");
@@ -407,7 +438,7 @@ int main(int argc, char *argv[]) {
     if (bpf_path[0] == '\0' && path_env != NULL) {
         char *path = strtok(path_env_copy, ":");
         while (path != NULL) {
-            snprintf(bpf_path, sizeof(bpf_path), "%s/" DEFAULT_BPF, path);
+            snprintf(bpf_path, sizeof(bpf_path), "%s/" DEFAULT_BPF_FN, path);
             FILE *fp = fopen(bpf_path, "r");
             if (fp != NULL) {
                 fclose(fp);
@@ -421,23 +452,19 @@ int main(int argc, char *argv[]) {
     path_env_copy = NULL;
 
     int ch;
-    char version[256] = "softgre_apd " VERSION;
-    char usage[1024] = "softgre_apd " VERSION "\n\n"
-        "Usage: softgre_apd [-dfVh] [interface(s)...]\n"
-        "Options:\n"
-        "  -c         Clear existing BPF programs on interfaces.\n"
-        "  -d         Enable debug logging.\n"
-        "  -f         Foreground mode (no daemonization).\n"
-        "  -m FILE    Map file (default: " DEFAULT_MAP ").\n"
-        "  -x FILE    BPF program file (default: neighbor " DEFAULT_BPF " or PATH\n"
-        "             " DEFAULT_BPF ").\n"
-        "  -V         Show version.\n"
-        "  -h -?      Show usage.\n";
-    while ((ch = getopt(argc, argv, "cdfm:x:Vh?")) != -1) {
+    while ((ch = getopt(argc, argv, "c:dfi:x:Vh?")) != -1) {
         switch (ch) {
             case 'c': {
-                clear_existing = 1;
-                // TODO: Implement.
+                int length = strlen(optarg);
+                if (length <= 0) {
+                    log_error("Invalid clients file.");
+                    return 1;
+                } else if (length > PATH_MAX) {
+                    log_error("Clients file path is too long.");
+                    return 1;
+                } else {
+                    strcpy(clients_path, optarg);
+                }
                 break;
             }
             case 'd': {
@@ -445,20 +472,17 @@ int main(int argc, char *argv[]) {
                 break;
             }
             case 'f': {
-                foreground = 1;
-                // TODO: Implement.
+                FOREGROUND = true;
                 break;
             }
-            case 'm': {
-                int map_length = strlen(optarg);
-                if (map_length <= 0) {
-                    log_error("Invalid map file.");
-                    return 1;
-                } else if (map_length > PATH_MAX) {
-                    log_error("Map file path is too long.");
-                    return 1;
+            case 'i': {
+                if (IFS_COUNT >= MAX_INTERFACES) {
+                    log_error("Exceeded max interfaces (%d); ignoring %s", MAX_INTERFACES, optarg);
                 } else {
-                    strcpy(map_path, optarg);
+                    strncpy(IFS[IFS_COUNT], optarg, IFS_MAX_STRLEN - 1);
+                    IFS[IFS_COUNT][IFS_MAX_STRLEN - 1] = '\0';
+                    IFS_PTRS[IFS_COUNT] = IFS[IFS_COUNT];
+                    IFS_COUNT++;
                 }
                 break;
             }
@@ -485,18 +509,18 @@ int main(int argc, char *argv[]) {
                 break;
             }
             case 'V': {
-                printf("%s\n", version);
+                printf("%s\n", VERSION_S);
                 exit(0);
                 break;
             }
             case 'h':
             case '?': {
-                printf("%s\n", usage);
+                printf("%s\n", USAGE_S);
                 exit(0);
                 break;
             }
             default: {
-                fprintf(stderr, "%s\n", usage);
+                fprintf(stderr, "%s\n", USAGE_S);
                 exit(1);
                 break;
             }
@@ -524,52 +548,19 @@ int main(int argc, char *argv[]) {
     signal(SIGTERM, interrupt_handler);
     signal(SIGQUIT, interrupt_handler);
 
-    // Organize interface list.
-    unsigned num_ifs = 0;
-    char **ifs = NULL;
-    if (optind >= argc) {
-        log_info("No interfaces specified; defaulting to all Ethernet interfaces.");
-        num_ifs = populate_all_ifs();
-
-        // Create array of pointers to each interface string.
-        for (unsigned i = 0; i < MAX_INTERFACES && i < num_ifs; i++) {
-            ALL_IFS_PTRS[i] = ALL_IFS[i];
-        }
-        ifs = ALL_IFS_PTRS;
-    } else {
-        num_ifs = argc - optind;
-        ifs = argv + optind;
-
-        // Enforce max interfaces.
-        if (num_ifs > MAX_INTERFACES) {
-            log_info("Max interfaces is %d; truncating list.", MAX_INTERFACES);
-            num_ifs = MAX_INTERFACES;
-        }
-    }
-
-    if (num_ifs == 0) {
-        log_error("No interfaces available.");
-        return 1;
-    } else {
-        log_info("Will attempt to bind to %d interface(s):", num_ifs);
-        for (unsigned i = 0; i < num_ifs; i++) {
-            log_info("  - %s", ifs[i]);
-        }
-    }
-
     // Load the BPF program onto selected interfaces.
-    log_info("Loading BPF program (bpf: %s, map: %s).", bpf_path, map_path);
-    BPFState *state = bpf_state__open(bpf_path, num_ifs, ifs);
+    log_info("Loading BPF programs (bpf: %s, map: %s).", bpf_path, clients_path);
+    BPFState *state = bpf_state__open(bpf_path, IFS_COUNT ? IFS_PTRS : NULL);
     if (!state) {
-        log_error("Failed to load BPF program.");
+        log_error("Failed to load BPF state.");
         exit(1);
     }
 
     // Initial map load.
-    update_bpf_map(state, map_path);
+    update_bpf_map(state, clients_path);
 
     // Watch the map file for changes.
-    bool watch_success = watch(map_path, &update_bpf_map, state);
+    bool watch_success = watch(clients_path, &update_bpf_map, state);
 
     log_info("Unloading BPF program.");
     bpf_state__close(state);

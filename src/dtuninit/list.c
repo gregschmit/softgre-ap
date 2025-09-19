@@ -2,16 +2,16 @@
  * Implementation of a dynamic homogeneous list of generic items (using void *), having O(1)
  * amortized insertion time and O(n) search time.
  *
- * This is currently used for storing the list of devices and IP configs. The linear search time is
+ * This is currently used for storing the list of clients and IP configs. The linear search time is
  * acceptable because:
- *   - both the list of devices and IP configs are fairly small (order of number of client stations
+ *   - both the list of clients and IP configs are fairly small (order of number of client stations
  *     on an AP)
  *   - this implementation stores the objects contiguously in memory, so the cache locality is good
  *   - the main thing we do when interacting with the BPF maps it to iterate these lists, so again
  *     cache locality helps us be fast there
- *   - search is only used for the GRE IP config list, which is typically an especially small list
+ *   - search is only used for the Peer IP config list, which is typically an especially small list
  *   - search is only used when building the initial list to avoid inserting multiple IP configs for
- *     the same GRE IP
+ *     the same Peer IP
  *   - we use a `cycle` for the BPF maps to make it quick and easy to remove stale entries
  *
  *  If we modify the BPF map update behavior or violate any of the other assumptions above, then we
@@ -42,8 +42,7 @@ List *list__new(size_t item_size, size_t key_size, list__key_eq_t key_eq) {
     list->key_size = key_size;
     list->key_eq = key_eq;
 
-    list->items = malloc(INITIAL_LIST_SIZE * item_size);
-    if (!list->items) {
+    if (!(list->items = malloc(INITIAL_LIST_SIZE * item_size))) {
         log_errno("malloc");
         log_error("Failed to allocate memory for list items.");
         list__free(list);
@@ -75,7 +74,7 @@ bool list__add(List *list, const void *item) {
 
         size_t new_size = list->size * 2;
 
-        // Should never happen unless device list struct is manually modified.
+        // Should never happen unless client list struct is manually modified.
         if (new_size < INITIAL_LIST_SIZE) {
             new_size = INITIAL_LIST_SIZE;
         }

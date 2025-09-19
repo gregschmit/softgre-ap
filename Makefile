@@ -21,27 +21,33 @@ CFLAGS_USR = $(CFLAGS_COMMON) $(if $(TARGET_USR),-target $(TARGET_USR),)
 CFLAGS_USR += -I/usr/include/x86_64-linux-gnu
 CFLAGS_USR += -I/usr/include/aarch64-linux-gnu
 
-OBJFILES_USR = src/softgre_apd.o src/bpf_state.o src/list.o src/log.o src/shared.o src/watch.o
+OBJFILES_USR = \
+	src/dtuninit/main.o \
+	src/shared.o \
+	src/dtuninit/bpf_state.o \
+	src/dtuninit/list.o \
+	src/dtuninit/log.o \
+	src/dtuninit/watch.o
 
 ifeq ($(STATIC),1)
 	LIBS_USR += -static
 endif
 
 .PHONY: all
-all: softgre_ap_bpf.o softgre_apd
+all: dtuninit_bpf.o dtuninit
 
-softgre_ap_bpf.o: src/softgre_ap_bpf.c
+dtuninit_bpf.o: src/dtuninit_bpf/main.c
 	$(CC) $(CFLAGS_BPF) -O$(OLEVEL) $(TARGET_BPF_FLAG) -c $^ -o $@
 
-softgre_apd: $(OBJFILES_USR)
+dtuninit: $(OBJFILES_USR)
 	$(CC) $(CFLAGS_USR) -O$(OLEVEL) $(TARGET_USR_FLAG) $^ -o $@ $(LIBS_USR)
 
 $(OBJFILES_USR): %.o : %.c
 	$(CC) $(CFLAGS_USR) -O$(OLEVEL) $(TARGET_USR_FLAG) -c $< -o $@
 
-dev: softgre_ap_bpf.o softgre_apd
+dev: dtuninit_bpf.o dtuninit
 	@echo "Running dev configuration..."
-	sudo ./softgre_apd -df -m ./softgre_ap_map.conf
+	sudo ./dtuninit -df -m ./dtuninit_clients
 
 .PHONY: static
 static:
@@ -70,9 +76,9 @@ build_static: docker_build
 # TODO: Get clang-tidy working.
 # .PHONY: tidy
 # tidy:
-# 	clang-tidy -checks='misc-include-cleaner' src/softgre_ap_bpf.c -- -target bpf $(CFLAGS)
-# 	clang-tidy -checks='misc-include-cleaner' src/softgre_apd.c -- $(CFLAGS)
+# 	clang-tidy -checks='misc-include-cleaner' src/dtuninit_bpf/main.c -- -target bpf $(CFLAGS)
+# 	clang-tidy -checks='misc-include-cleaner' src/dtuninit/main.c -- $(CFLAGS)
 
 .PHONY: clean
 clean:
-	rm -f softgre_ap_bpf.o softgre_apd **/*.o
+	rm -f dtuninit_bpf.o dtuninit **/*.o

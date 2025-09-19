@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "shared.h"
+#include "../shared.h"
 
 #include "log.h"
 
