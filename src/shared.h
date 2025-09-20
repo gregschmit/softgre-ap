@@ -1,5 +1,5 @@
 /*
- * Shared definitions for the BPF program and the userspace daemon.
+ * Shared definitions for the BPF programs and the userspace daemon.
  *
  * WARNING: Since these definitions are shared between kernel and userspace, they must only use
  * features available in both contexts, or conditionally use equivalent features based on the
@@ -12,7 +12,7 @@
 // Detect BPF compilation context. Indented for readability.
 #ifdef __BPF__
 
-// BPF program: use kernel headers.
+// BPF programs: use kernel headers.
 #include <linux/if_ether.h>
 #include <linux/in.h>
 #include <linux/types.h>
@@ -48,19 +48,46 @@ typedef _Bool bool;
 #define MAX_DEVICES 1024
 #define MAX_INTERFACES 32
 
-extern bool DEBUG;
+typedef enum {
+    TUN_PROTO_GRE = 0,
+    TUN_PROTO_L2TP = 1,
+    TUN_PROTO_VXLAN = 2,
+} tun_proto_t;
+
+typedef enum {
+    TUN_GRE_SUBPROTO_V0 = 0,
+    TUN_GRE_SUBPROTO_V0UDP = 1,
+} tun_gre_subproto_t;
+
+typedef enum {
+    TUN_L2TP_SUBPROTO_V3 = 0,
+} tun_l2tp_subproto_t;
+
+typedef enum {
+    TUN_VXLAN_SUBPROTO_V0 = 0,
+} tun_vxlan_subproto_t;
+
+typedef struct {
+    tun_proto_t proto;
+    union {
+        tun_gre_subproto_t gre;
+        tun_l2tp_subproto_t l2tp;
+        tun_vxlan_subproto_t vxlan;
+    } subproto;
+} TunConfig;
 
 typedef struct {
     uint8_t mac[ETH_ALEN];  // Key
-    struct in_addr gre_ip;
+    TunConfig tun_config;
+    struct in_addr peer_ip;
     uint16_t vlan;
 
     unsigned ifindex;
     uint8_t cycle;  // For removing stale entries.
-} Device;
+} Client;
 
 typedef struct {
-    struct in_addr gre_ip;  // Key
+    struct in_addr peer_ip;  // Key
     struct in_addr src_ip;
     // Might need these. Currently trying to use bpf_redirect_neigh to hopefully be able to just
     // let the kernel handle the ethhdr.
@@ -76,7 +103,7 @@ typedef struct {
 } VLANCfg;
 
 #ifndef __BPF__
-bool device__key_eq(const uint8_t *key1, const uint8_t *key2);
+bool client__key_eq(const uint8_t *key1, const uint8_t *key2);
 bool ip_cfg__key_eq(const struct in_addr *key1, const struct in_addr *key2);
 bool ip_cfg__is_valid(const IPCfg *ip_cfg);
 #endif  // __BPF__

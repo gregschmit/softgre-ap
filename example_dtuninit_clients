@@ -1,0 +1,6 @@
+# Default location is `/var/run/dtuninit_clients`.
+# Format: <MAC> <PROTO/SUBPROTO> <PEER_IP> <ARGS>
+
+# Example GRE clients:
+00:00:00:00:00:01 gre/v0 199.27.253.45
+00:00:00:00:00:02 gre/v0 199.27.253.46 vlan=200

@@ -3,7 +3,7 @@
 
 #include <stdbool.h>
 
-#include "shared.h"
+#include "../shared.h"
 
 typedef bool (*list__key_eq_t)(const void* key1, const void* key2);
 

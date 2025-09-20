@@ -1,0 +1,17 @@
+# Location: `/etc/systemd/system/dtuninit.service`.
+# To enable: `systemctl enable dtuninit.service`.
+# To start without rebooting: `systemctl start dtuninit`.
+
+[Unit]
+Description=Dynamic Tunnel Initiator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/dtuninit -S
+Restart=always
+RestartSec=5s
+
+[Install]
+WantedBy=multi-user.target
