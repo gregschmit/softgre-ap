@@ -1,5 +1,5 @@
 /*
- * Dynamic Tunnel Initiator BPF Programs
+ * Dynamic Tunnel Initiator: BPF Programs
  *
  * This file consists of two BPF programs, an XDP component and a TC component.
  *

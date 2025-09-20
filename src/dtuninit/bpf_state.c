@@ -1,12 +1,11 @@
 #include <errno.h>
-#include <stdint.h>
-#include <stdlib.h>
-#include <string.h>
-
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <netinet/ether.h>
 #include <netinet/in.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include <linux/if_packet.h>
 
@@ -98,13 +97,10 @@ BPFState *bpf_state__open(char *bpf_path, char **specified_ifs) {
         }
     }
 
-    // If no interfaces found, cleanup. While an error condition, this is not a failure condition,
-    // because we may just be waiting for interfaces to appear.
     if (!num_ifs) {
         log_error("No Ethernet interfaces available to attach to.");
-        goto cleanup;
+        goto failure;
     }
-
     state->num_ifs = num_ifs;
 
     // Allocate memory for interface indexes.
@@ -205,10 +201,8 @@ BPFState *bpf_state__open(char *bpf_path, char **specified_ifs) {
     }
 
     if (successful_attachments == 0) {
-        // If we failed to attach to any interface, then just log a message. While this is an error
-        // condition, this is not a failure condition, because we may just be waiting for the proper
-        // interfaces to appear or be put into a state where they can have BPF programs attached.
         log_info("Failed to attach BPF programs to any interface.");
+        goto failure;
     }
 
     // Success, cleanup.

@@ -9,9 +9,7 @@ packets between the client and the GRE IP endpoint.
 
 ## TODO
 
-- Implement daemonization.
 - Modify watch logic to reload when interfaces change (needed for being a reasonable daemon).
-- Modify clients file format to support multiple protocols.
 - Implement subcommands so it can be started, but also used as a tool to manage the clients file.
 - Implement GRE over UDP to support NAT.
 - Implement VXLAN.

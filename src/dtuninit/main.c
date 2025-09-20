@@ -1,15 +1,20 @@
 /*
- * Dynamic Tunnel Initiator Userspace Program
+ * Dynamic Tunnel Initiator: Userspace Program
  *
- * This program's primary subcommand `start` loads/unload the BPF program and monitors the clients
+ * This program's primary subcommand `start` loads/unload the BPF programs and monitors the clients
  * file to keep the BPF maps updated. It also provides subcommands for adding/removing clients, to
  * avoid requiring users of this software from having to manually parse and write to the clients
  * file.
  */
 
+#include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <getopt.h>
+#include <ifaddrs.h>
 #include <limits.h>
+#include <net/if.h>
+#include <netinet/in.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdbool.h>
@@ -17,13 +22,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
-
-#include <arpa/inet.h>
-#include <ifaddrs.h>
-#include <net/if.h>
-#include <netinet/in.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include <linux/bpf.h>
 
@@ -33,25 +34,22 @@
 #include "watch.h"
 #include "bpf_state.h"
 
-#define VERSION_S "dtuninit " VERSION
-#define USAGE_S \
-    VERSION_S "\n\n" \
-    "Usage: dtuninit [-cdfixVh]\n" \
-    "Options:\n" \
-    "  -c <FILE>  Clients file (default: " DEFAULT_CLIENTS_PATH ").\n" \
-    "  -d         Enable debug logging.\n" \
-    "  -f         Foreground mode (no daemonization).\n" \
-    "  -i <IF>    Bind the BPF program to this interface.\n" \
-    "  -x <FILE>  BPF programs file (default: neighbor " DEFAULT_BPF_FN " or PATH\n" \
-    "             " DEFAULT_BPF_FN ").\n" \
-    "  -V         Show version.\n" \
-    "  -h -?      Show usage.\n"
-
 #define DEFAULT_CLIENTS_PATH "/var/run/dtuninit_clients"
 #define DEFAULT_BPF_FN "dtuninit_bpf.o"
 
+#define VERSION_S "dtuninit " VERSION
+#define USAGE_S \
+    VERSION_S "\nThe Dynamic Tunnel Initiator\n\n" \
+    "Usage: dtuninit [OPTIONS]\n\n" \
+    "Options:\n" \
+    "  -B <FILE>  Set BPF object file (default: " DEFAULT_BPF_FN " from current dir or PATH).\n" \
+    "  -C <FILE>  Set Clients file (default: " DEFAULT_CLIENTS_PATH ").\n" \
+    "  -d         Enable debug logging.\n" \
+    "  -i <IF>    Bind to interface `IF`.\n" \
+    "  -V         Show version.\n" \
+    "  -h -?      Show usage.\n"
+
 volatile bool INTERRUPT = false;
-bool FOREGROUND = false;
 
 // Static storage to hold interface data.
 #define IFS_MAX_STRLEN 256
@@ -407,24 +405,74 @@ void update_bpf_map(BPFState *state, const char *clients_path) {
     list__free(ip_cfgs);
 }
 
+bool start(char *bpf_path, char *clients_path) {
+    log_info("Registering signal handlers.");
+    signal(SIGHUP, interrupt_handler);
+    signal(SIGINT, interrupt_handler);
+    signal(SIGTERM, interrupt_handler);
+    signal(SIGQUIT, interrupt_handler);
+
+    // Stop libbpf from printing.
+    libbpf_set_print(NULL);
+
+    log_info("BPF object file: `%s`.", bpf_path);
+    log_info("Clients file: `%s`.", clients_path);
+    log_info("Loading BPF programs.");
+    BPFState *state = bpf_state__open(bpf_path, IFS_COUNT ? IFS_PTRS : NULL);
+    if (!state) {
+        log_error("Failed to load BPF state.");
+        return false;
+    }
+
+    // Initial map load.
+    update_bpf_map(state, clients_path);
+
+    // Watch the map file for changes.
+    bool watch_success = watch(clients_path, &update_bpf_map, state);
+
+    log_info("Unloading BPF programs.");
+    bpf_state__close(state);
+
+    return watch_success;
+}
+
 int main(int argc, char *argv[]) {
-    char bpf_path[PATH_MAX + 1] = "";
+    char bpf_path[PATH_MAX + sizeof(DEFAULT_BPF_FN) + 1] = "";
     char clients_path[PATH_MAX + 1] = DEFAULT_CLIENTS_PATH;
 
-    // If this program was invoked with a path, then assume the BPF program is in the same
-    // directory.
-    char *last_slash = strrchr(argv[0], '/');
-    if (last_slash != NULL) {
-        int len = last_slash - argv[0];
-        snprintf(bpf_path, sizeof(bpf_path), "%.*s/" DEFAULT_BPF_FN, len, argv[0]);
+    // Detect if we have a TTY that also supports color.
+    if (isatty(fileno(stderr))) {
+        if (getenv("COLORTERM")) {
+            COLOR = true;
+        }
 
-        // Check if that file DOESN'T exist, and if so, clear the `bpf_path`.
+        char *term = getenv("TERM");
+        if (
+            strstr(term, "color") ||
+            strstr(term, "xterm") ||
+            strstr(term, "screen") ||
+            strstr(term, "linux") ||
+            strstr(term, "rxvt") ||
+            strstr(term, "vt100") ||
+            strstr(term, "ansi")
+        ) {
+            COLOR = true;
+        }
+    }
+
+    // Try to find BPF object file from current directory.
+    if (getcwd(bpf_path, sizeof(bpf_path))) {
+        strncat(bpf_path, "/" DEFAULT_BPF_FN, sizeof(bpf_path) - strlen(bpf_path) - 1);
         FILE *fp = fopen(bpf_path, "r");
         if (fp == NULL) {
             bpf_path[0] = '\0';
         } else {
             fclose(fp);
         }
+    } else {
+        log_errno("getcwd");
+        log_error("Failed to get current working directory.");
+        return 1;
     }
 
     // If that file doesn't exist, try to find using PATH.
@@ -452,9 +500,31 @@ int main(int argc, char *argv[]) {
     path_env_copy = NULL;
 
     int ch;
-    while ((ch = getopt(argc, argv, "c:dfi:x:Vh?")) != -1) {
+    while ((ch = getopt(argc, argv, "B:C:di:Vh?")) != -1) {
         switch (ch) {
-            case 'c': {
+            case 'B': {
+                size_t bpf_length = strlen(optarg);
+                if (bpf_length <= 0) {
+                    log_error("Invalid BPF object file.");
+                    return 1;
+                } else if (bpf_length > PATH_MAX) {
+                    log_error("BPF object file path is too long.");
+                    return 1;
+                } else {
+                    strcpy(bpf_path, optarg);
+                }
+
+                FILE *fp = fopen(bpf_path, "r");
+                if (fp == NULL) {
+                    log_errno("fopen");
+                    log_error("BPF object file could not be opened.");
+                    return 1;
+                } else {
+                    fclose(fp);
+                }
+                break;
+            }
+            case 'C': {
                 int length = strlen(optarg);
                 if (length <= 0) {
                     log_error("Invalid clients file.");
@@ -471,10 +541,6 @@ int main(int argc, char *argv[]) {
                 DEBUG = true;
                 break;
             }
-            case 'f': {
-                FOREGROUND = true;
-                break;
-            }
             case 'i': {
                 if (IFS_COUNT >= MAX_INTERFACES) {
                     log_error("Exceeded max interfaces (%d); ignoring %s", MAX_INTERFACES, optarg);
@@ -486,84 +552,42 @@ int main(int argc, char *argv[]) {
                 }
                 break;
             }
-            case 'x': {
-                int bpf_length = strlen(optarg);
-                if (bpf_length <= 0) {
-                    log_error("Invalid BPF program file.");
-                    return 1;
-                } else if (bpf_length > PATH_MAX) {
-                    log_error("BPF program file path is too long.");
-                    return 1;
-                } else {
-                    strcpy(bpf_path, optarg);
-                }
-
-                FILE *fp = fopen(bpf_path, "r");
-                if (fp == NULL) {
-                    log_errno("fopen");
-                    log_error("BPF program file could not be opened.");
-                    return 1;
-                } else {
-                    fclose(fp);
-                }
-                break;
-            }
             case 'V': {
-                printf("%s\n", VERSION_S);
+                log_info("%s", VERSION_S);
                 exit(0);
                 break;
             }
             case 'h':
             case '?': {
-                printf("%s\n", USAGE_S);
+                log_info("%s", USAGE_S);
                 exit(0);
                 break;
             }
             default: {
-                fprintf(stderr, "%s\n", USAGE_S);
+                log_error("%s", USAGE_S);
                 exit(1);
                 break;
             }
         }
     }
 
-    // Check that we have an BPF program.
+    // Check that we have a BPF object file.
     if (bpf_path[0] == '\0') {
-        log_error("No BPF program found.");
+        log_error("No BPF object file found.");
         return 1;
     }
 
-    // Check if BPF program can be read.
+    // Check if BPF object file can be read.
     FILE *fp = fopen(bpf_path, "r");
     if (fp == NULL) {
         log_errno("fopen");
-        log_error("BPF program file could not be opened.");
+        log_error("BPF object file could not be opened.");
         return 1;
     } else {
         fclose(fp);
     }
 
-    // Register signal handlers.
-    signal(SIGINT, interrupt_handler);
-    signal(SIGTERM, interrupt_handler);
-    signal(SIGQUIT, interrupt_handler);
+    bool success = start(bpf_path, clients_path);
 
-    // Load the BPF program onto selected interfaces.
-    log_info("Loading BPF programs (bpf: %s, map: %s).", bpf_path, clients_path);
-    BPFState *state = bpf_state__open(bpf_path, IFS_COUNT ? IFS_PTRS : NULL);
-    if (!state) {
-        log_error("Failed to load BPF state.");
-        exit(1);
-    }
-
-    // Initial map load.
-    update_bpf_map(state, clients_path);
-
-    // Watch the map file for changes.
-    bool watch_success = watch(clients_path, &update_bpf_map, state);
-
-    log_info("Unloading BPF program.");
-    bpf_state__close(state);
-
-    return watch_success ? 0 : 1;
+    return success ? 0 : 1;
 }

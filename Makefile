@@ -47,7 +47,7 @@ $(OBJFILES_USR): %.o : %.c
 
 dev: dtuninit_bpf.o dtuninit
 	@echo "Running dev configuration..."
-	sudo ./dtuninit -df -m ./dtuninit_clients
+	sudo ./dtuninit -df -c ./dtuninit_clients
 
 .PHONY: static
 static:
@@ -62,6 +62,10 @@ cross:
 docker_build:
 	@echo "Building Docker image..."
 	docker build -t dtuninit .
+
+.PHONY: docker_run
+docker_run: docker_build
+	docker run -it --rm -v .:/app dtuninit /bin/sh
 
 .PHONY: build
 build: docker_build
