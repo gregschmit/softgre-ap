@@ -47,7 +47,7 @@ $(OBJFILES_USR): %.o : %.c
 
 dev: dtuninit_bpf.o dtuninit
 	@echo "Running dev configuration..."
-	sudo ./dtuninit -df -c ./dtuninit_clients
+	sudo ./dtuninit -d -C ./dtuninit_clients
 
 .PHONY: static
 static:
