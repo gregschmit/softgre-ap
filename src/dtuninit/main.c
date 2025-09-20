@@ -158,15 +158,13 @@ bool populate_ip_cfg(IPCfg *ip_cfg) {
     return true;
 }
 
-bool split(const char *s, char delim, char *left, char *right) {
+char *split(const char *s, char delim) {
     char *d = strchr(s, delim);
-    if (!d) { return false; }
-    if (d == s) { return false; }
-    if (*(d + 1) == '\0') { return false; }
+    if (!d) { return NULL; }
+    if (d == s) { return NULL; }
+    if (*(d + 1) == '\0') { return NULL; }
     *d = '\0';
-    left = (char *)s;
-    right = (char *)(d + 1);
-    return true;
+    return d + 1;
 }
 
 void parse_clients_file(const char *path, List *clients, List *ip_cfgs, uint8_t cycle) {
@@ -193,7 +191,7 @@ void parse_clients_file(const char *path, List *clients, List *ip_cfgs, uint8_t 
 
         // Parse the line, logging but otherwise disregarding any errors.
         Client client = {.cycle = cycle};
-        char proto_subproto[16] = "";
+        char protocol[16] = "";
         char args[128] = "";
         int n = sscanf(
             linebuf,
@@ -204,7 +202,7 @@ void parse_clients_file(const char *path, List *clients, List *ip_cfgs, uint8_t 
             &client.mac[3],
             &client.mac[4],
             &client.mac[5],
-            proto_subproto,
+            protocol,
             args
         );
 
@@ -214,22 +212,22 @@ void parse_clients_file(const char *path, List *clients, List *ip_cfgs, uint8_t 
         }
 
         // Parse proto/subproto.
-        char *proto = NULL, *subproto = NULL;
-        if (!split(proto_subproto, '/', proto, subproto)) {
-            log_error("Failed to parse protocol/subprotocol: `%s`", proto_subproto);
+        char *subprotocol = NULL;
+        if (!(subprotocol = split(protocol, '/'))) {
+            log_error("Failed to parse protocol/subprotocol: `%s`", protocol);
             continue;
         }
 
-        if (!strcmp(proto, "gre")) {
-            log_error("Unsupported protocol: `%s`", proto);
+        if (strcmp(protocol, "gre")) {
+            log_error("Unsupported protocol: `%s`", protocol);
             continue;
         }
         client.tun_config.proto = TUN_PROTO_GRE;
 
-        if (!strcmp(subproto, "v0")) {
+        if (!strcmp(subprotocol, "v0")) {
             client.tun_config.subproto.gre = TUN_GRE_SUBPROTO_V0;
         } else {
-            log_error("Unsupported GRE subprotocol: `%s`", subproto);
+            log_error("Unsupported GRE subprotocol: `%s`", subprotocol);
             continue;
         }
 
@@ -246,12 +244,12 @@ void parse_clients_file(const char *path, List *clients, List *ip_cfgs, uint8_t 
 
         while (true) {
             // Get next arg.
-            char *arg = strtok(NULL, " ");
-            if (!arg) { break; }
+            char *key = strtok(NULL, " ");
+            if (!key) { break; }
 
             // Parse into key/value.
-            char *key = NULL, *value = NULL;
-            if (!split(arg, '=', key, value)) { break; }
+            char *value = NULL;
+            if (!(value = split(key, '='))) { break; }
 
             // For now, only support vlan key.
             if (!strcmp(key, "vlan")) {
